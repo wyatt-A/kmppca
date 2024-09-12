@@ -3,6 +3,8 @@ use crate::ceiling_div;
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashSet;
+
     use crate::patch_generator::PatchGenerator;
     use cfl::ndarray::{ArrayD,ShapeBuilder};
     use cfl::num_complex::Complex32;
@@ -61,6 +63,47 @@ mod tests {
         println!("checking consistency ...");
         assert_eq!(y.as_slice(),volume_data)
         
+    }
+
+    #[test]
+    fn non_overlapping_patches() {
+
+        let patch_generator = PatchGenerator::new([512,512,512],[2,2,2],[2,2,2]);
+
+        let mut partitioned_patch_ids:Vec<Vec<usize>> = vec![vec![]];
+        let mut partition_entries:Vec<HashSet<usize>> = vec![HashSet::new()];
+
+        for (patch_index,patch_entries) in patch_generator.iter().enumerate() {
+
+            let mut patch_entries = HashSet::from_iter(patch_entries.into_iter());
+
+            // try to find a partition for the patch, draining the patch if one is found
+            for (partition_entry,patch_ids) in partition_entries.iter_mut().zip(partitioned_patch_ids.iter_mut()) {
+                if partition_entry.is_disjoint(&patch_entries) {
+                    partition_entry.extend(patch_entries.drain());
+                    patch_ids.push(patch_index);
+                    break
+                }
+            };
+
+            // if the patch has not been drained because no suitable partition was found,
+            // create a new partition
+            if !patch_entries.is_empty() {
+                partition_entries.push(
+                    HashSet::from_iter(patch_entries.into_iter())
+                );
+                partitioned_patch_ids.push(vec![patch_index]);
+            }
+
+        }
+
+        for partition in partitioned_patch_ids {
+            println!("{:?}",partition)
+        }
+
+        
+
+
     }
 }
 
