@@ -1,5 +1,5 @@
 pub mod patch_generator;
-use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek}, path::Path};
+use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek}, mem::size_of, path::Path};
 
 use cfl::num_complex::Complex32;
 use ndarray_linalg::{c32, SVD};
@@ -7,7 +7,7 @@ use ndarray_linalg::{c32, SVD};
 #[cfg(test)]
 mod tests {
 
-    use cfl::ndarray::{Array3, ArrayD, Axis, Ix2, Ix3, ShapeBuilder};
+    use cfl::{ndarray::{Array3, ArrayD, Axis, Ix2, Ix3, ShapeBuilder}, CflReader};
     use ndarray_linalg::{c32, SVD};
     use cfl::num_complex::Complex32;
     use crate::{patch_generator::PatchGenerator, VolumeReader};
@@ -26,17 +26,18 @@ mod tests {
     #[test]
     fn vol_reader() {
         let dims = [197,120,120];
-        let vol0 = VolumeReader::new("/Users/Wyatt/scratch/4D_test_data/raw/i00.cfl");
-        let vol1 = VolumeReader::new("/Users/Wyatt/scratch/4D_test_data/raw/i01.cfl");
 
-        let mut data_set = vec![vol0,vol1];
+        let mut data_set = vec![];
+        for i in 0..67 {
+            let filename = format!("/home/wyatt/nordic_test/i{:02}",i);
+            data_set.push(
+                CflReader::new(filename).unwrap()
+            )
+        }
 
-        let patch_gen = PatchGenerator::new(dims, [197,120,120], [197,120,120]);
+        let patch_gen = PatchGenerator::new(dims, [11,11,11], [8,8,8]);
 
-        let patch_batch_size = 1;
-
-
-        //let mut patch_data = vec![vec![vec![Complex32::ZERO;patch_gen.patch_size()];data_set.len()];patch_batch_size];
+        let patch_batch_size = 200;
 
         let mut patch_d = Array3::from_elem((patch_gen.patch_size(),data_set.len(),patch_batch_size).f(), Complex32::ZERO);
 
@@ -45,16 +46,11 @@ mod tests {
         patch_d.axis_iter_mut(Axis(2)).for_each(|mut patch|{
             let patch_idx = it.next().unwrap();
             for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(data_set.iter_mut()) {
-                vol.fill(&patch_idx, col.as_slice_memory_order_mut().unwrap())
+                vol.read_into(&patch_idx, col.as_slice_memory_order_mut().unwrap()).unwrap()
             }
         });
 
-
-
         println!("patch data: {:?}",patch_d);
-
-        //println!("{:#?}",data_set);
-
 
     }
     
@@ -80,13 +76,13 @@ impl VolumeReader {
 
         let data = cfl::to_array(&cfl, true).unwrap();
         
-        let data_cache:HashMap<usize,Complex32> = HashMap::from_iter(
-            data.as_slice_memory_order().unwrap().iter().enumerate().map(|(idx,val)|(idx,*val))
-        );
+        // let data_cache:HashMap<usize,Complex32> = HashMap::from_iter(
+        //     data.as_slice_memory_order().unwrap().iter().enumerate().map(|(idx,val)|(idx,*val))
+        // );
         
         Self {
             file: File::open(cfl.as_ref().with_extension("cfl")).unwrap(),
-            data_cache: data_cache,
+            data_cache: HashMap::new(),
             read_buffer: [0u8;8],
             max_cache_size: None,
             cache_hits:0,
