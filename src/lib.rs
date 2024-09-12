@@ -1,20 +1,24 @@
 pub mod patch_generator;
 use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek}, mem::size_of, path::Path};
 
-use cfl::num_complex::Complex32;
-use ndarray_linalg::{c32, SVD};
+use cfl::{ndarray::{Array2, Array3, Axis}, num_complex::{Complex, Complex32}};
+use indicatif::ProgressStyle;
+use ndarray_linalg::{c32, SVDInplace, SVD};
+use patch_generator::PatchGenerator;
 
 #[cfg(test)]
 mod tests {
 
-    use cfl::{ndarray::{Array3, ArrayD, Axis, Ix2, Ix3, ShapeBuilder}, CflReader};
+    use std::time::Instant;
+
+    use cfl::{ndarray::{Array3, ArrayD, Axis, Ix2, Ix3, ShapeBuilder}, CflReader, CflWriter};
     use ndarray_linalg::{c32, SVD};
     use cfl::num_complex::Complex32;
-    use crate::{patch_generator::PatchGenerator, VolumeReader};
+    use crate::{ceiling_div, patch_generator::PatchGenerator, singular_value_threshold};
 
     #[test]
     fn it_works() {
-        let x = cfl::to_array("/Users/Wyatt/scratch/4D_test_data/raw/i00", true).unwrap().into_dimensionality::<Ix3>().unwrap();
+        let x = cfl::to_array("/Users/Wyatt/scratch/4D_test_data/pc/i00", true).unwrap().into_dimensionality::<Ix3>().unwrap();
         let y = x.index_axis(Axis(0), 0);
         let (u,s,v) = y.svd(true, true).unwrap();
         let s = s.diag();
@@ -27,30 +31,72 @@ mod tests {
     fn vol_reader() {
         let dims = [197,120,120];
 
+        // construct a collection of cfl volume readers called a data set
         let mut data_set = vec![];
         for i in 0..67 {
-            let filename = format!("/home/wyatt/nordic_test/i{:02}",i);
+            let filename = format!("/Users/Wyatt/scratch/4D_test_data/raw/i{:02}",i);
             data_set.push(
                 CflReader::new(filename).unwrap()
             )
         }
 
-        let patch_gen = PatchGenerator::new(dims, [11,11,11], [8,8,8]);
+        println!("preparing output files ...");
+        let mut data_set_write = vec![];
+        for i in 0..67 {
+            let filename = format!("/Users/Wyatt/scratch/4D_test_data/raw/i{:02}_out",i);
+            data_set_write.push(
+                CflWriter::new(filename,&dims).unwrap()
+            )
+        }
 
-        let patch_batch_size = 200;
+        // construct a patch generator for patch data extraction
+        let patch_gen = PatchGenerator::new(dims, [10,10,10], [10,10,10]);
 
-        let mut patch_d = Array3::from_elem((patch_gen.patch_size(),data_set.len(),patch_batch_size).f(), Complex32::ZERO);
+        // define the number of patches to extract in this batch
+        let patch_batch_size = 500;
 
-        let mut it = patch_gen.into_iter();
 
-        patch_d.axis_iter_mut(Axis(2)).for_each(|mut patch|{
-            let patch_idx = it.next().unwrap();
-            for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(data_set.iter_mut()) {
-                vol.read_into(&patch_idx, col.as_slice_memory_order_mut().unwrap()).unwrap()
-            }
-        });
+        let n_batches = patch_gen.n_patches() / patch_batch_size;
+        let remainder = patch_gen.n_patches() % patch_batch_size;
 
-        println!("patch data: {:?}",patch_d);
+        let mut start_patch_id = 0;
+
+        for batch in 0..n_batches {
+            println!("processing batch {} of {} ...",batch+1,n_batches);
+            let mut patch_data = Array3::from_elem((patch_gen.patch_size(),data_set.len(),patch_batch_size).f(), Complex32::ZERO);
+
+            //println!("reading patches ...");
+            // iterate over the patch batch
+            patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
+                // get the patch index values, shared over all volumes in data set
+                let patch_indices = patch_gen.nth(idx + start_patch_id).unwrap();
+                // iterate over each volume, assigning patch data to a single column
+                for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(data_set.iter_mut()) {
+                    // read_into uses memory mapping internally to help with random indexing of volume files
+                    vol.read_into(&patch_indices, col.as_slice_memory_order_mut().unwrap()).unwrap()
+                }
+            });
+
+            //println!("processing patches ...");
+            singular_value_threshold(&mut patch_data, 200.);
+            //println!("writing patches ...");
+
+            patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
+                // get the patch index values, shared over all volumes in data set
+                let patch_indices = patch_gen.nth(idx + start_patch_id).unwrap();
+                // iterate over each volume, assigning patch data to a single column
+                for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(data_set_write.iter_mut()) {
+                    // write_from uses memory mapping internally to help with random indexing of volume files
+                    vol.write_from(&patch_indices, col.as_slice_memory_order_mut().unwrap()).unwrap()
+                }
+            });
+
+            start_patch_id += patch_batch_size;
+        }
+
+        // construct the patch data array, initialized to ones
+
+        println!("done.");
 
     }
     
@@ -58,93 +104,42 @@ mod tests {
 }
 
 
-#[derive(Debug)]
-struct VolumeReader {
-    file: File,
-    data_cache:HashMap<usize,Complex32>,
-    num_elements:usize,
-    read_buffer:[u8;8],
-    max_cache_size:Option<usize>,
-    cache_hits:usize,
-    cache_misses:usize,
+fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:f32) {
+
+    let m = patch_data.shape()[0];
+    let n = patch_data.shape()[1];
+
+    let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
+    
+    let prog_bar = indicatif::ProgressBar::new(patch_data.shape()[2] as u64);
+    prog_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}").unwrap()
+            .progress_chars("=>-")
+    );
+    
+    patch_data.axis_iter_mut(Axis(2)).for_each(|mut matrix| {
+        let (u,mut s,v) = matrix.svd(true, true).unwrap();
+
+        //s.map_inplace(|val| if *val < threshold {*val = 0.});
+        s.iter_mut().enumerate().for_each(|(i,val)| if i > 0 {*val = 0.});
+
+        let u = u.unwrap();
+        let v = v.unwrap();
+        let mut diag_view = _s.diag_mut();
+        diag_view.assign(
+            &s.map(|x|Complex32::new(*x,0.))
+        );
+        let denoised_matrix = u.dot(&_s).dot(&v);
+        matrix.assign(&denoised_matrix);
+        prog_bar.inc(1);
+    });
+    prog_bar.finish();
+    //prog_bar.finish_with_message("done");
 }
 
-impl VolumeReader {
-    pub fn new(cfl:impl AsRef<Path>) -> Self {
 
-        let dims = cfl::get_dims(cfl.as_ref().with_extension("hdr")).unwrap();
 
-        let data = cfl::to_array(&cfl, true).unwrap();
-        
-        // let data_cache:HashMap<usize,Complex32> = HashMap::from_iter(
-        //     data.as_slice_memory_order().unwrap().iter().enumerate().map(|(idx,val)|(idx,*val))
-        // );
-        
-        Self {
-            file: File::open(cfl.as_ref().with_extension("cfl")).unwrap(),
-            data_cache: HashMap::new(),
-            read_buffer: [0u8;8],
-            max_cache_size: None,
-            cache_hits:0,
-            cache_misses:0,
-            num_elements: dims.iter().product()
-        }       
-    }
-
-    pub fn fill(&mut self,indices:&[usize],dst:&mut [Complex32]) {
-        indices.iter().zip(dst.iter_mut()).for_each(|(idx,val)|{
-            *val = self.get(*idx).unwrap()
-        });
-    }
-
-    pub fn get(&mut self,idx:usize) -> Option<Complex32> {
-
-        if idx >= self.num_elements {
-            println!("index out of bounds {} >= {}",idx,self.num_elements);
-            return None
-        }
-
-        if let Some(entry) = self.data_cache.get(&idx) {
-            self.cache_hits += 1;
-            return Some(*entry)
-        }else {
-            self.file.seek(std::io::SeekFrom::Start((idx * size_of::<Complex32>()) as u64)).unwrap();
-            self.file.read_exact(&mut self.read_buffer).unwrap();
-
-            let mut val = [Complex32::ZERO];
-        
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    self.read_buffer.as_ptr(),
-                    val.as_mut_ptr() as *mut u8,
-                    std::mem::size_of::<Complex32>(),
-                );
-            }
-
-            self.data_cache.insert(idx, val[0]);
-            self.cache_value(idx, val[0]);
-            self.cache_misses += 1;
-            Some(val[0])
-        }
-    }
-
-    fn cache_value(&mut self, idx: usize, value: Complex32) {
-        // Insert into cache
-        if let Some(max_size) = self.max_cache_size {
-            if self.data_cache.len() >= max_size {
-                // Evict a value if the cache is full (e.g., use LRU)
-                self.evict();
-            }
-        }
-
-        self.data_cache.insert(idx, value);
-    }
-
-    // A simple eviction policy: remove the first inserted element (you can optimize this later)
-    fn evict(&mut self) {
-        if let Some((&first_key, _)) = self.data_cache.iter().next() {
-            self.data_cache.remove(&first_key);
-        }
-    }
-
+pub fn ceiling_div(a:usize,b:usize) -> usize {
+    (a + b - 1) / b
 }

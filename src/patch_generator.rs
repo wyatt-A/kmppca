@@ -1,3 +1,5 @@
+use crate::ceiling_div;
+
 #[cfg(test)]
 mod tests {
 
@@ -124,6 +126,18 @@ impl<'a> PatchIterator<'a> {
         
     }
 
+    fn nth(&mut self,idx:usize) -> Option<Vec<usize>> {
+        self.x_state = 0;
+        self.y_state = 0;
+        self.z_state = 0;
+        for _ in 0..idx {
+            if !self.advance_state() {
+                return None
+            }
+        }
+        Some(self.patch_indices())
+    }
+
     fn patch_indices(&self) -> Vec<usize> {
         let x = self.x.nth(self.x_state).unwrap();
         let y = self.y.nth(self.y_state).unwrap();
@@ -146,41 +160,6 @@ impl<'a> PatchIterator<'a> {
     }
 }
 
-
-
-impl PatchGenerator {
-
-    pub fn new(array_size:[usize;3],patch_size:[usize;3],strides:[usize;3]) -> Self {
-
-        array_size.iter().zip(patch_size.iter()).for_each(|(x,p)|{
-            assert!(x >= p, "patch dimensions must be less than or equal to array dimensions")
-        });
-
-        array_size.iter().zip(strides.iter()).for_each(|(x,p)|{
-            assert!(x >= p, "stride sizes must be less than or equal to array dimensions")
-        });
-
-        Self {
-            x: CircularWindow1D::new(array_size[0],patch_size[0],strides[0]),
-            y: CircularWindow1D::new(array_size[1],patch_size[1],strides[1]),
-            z: CircularWindow1D::new(array_size[2],patch_size[2],strides[2]),
-        }
-    }
-
-    pub fn patch_size(&self) -> usize {
-        self.x.window_len * self.y.window_len * self.z.window_len
-    }
-
-    pub fn n_patches(&self) -> usize {
-        self.x.n_iter() * self.y.n_iter() * self.z.n_iter()
-    }
-
-    fn iter(&self) -> PatchIterator {
-        self.into_iter()
-    }
-
-}
-
 impl<'a> Iterator for PatchIterator<'a> {
     type Item = Vec<usize>;
 
@@ -198,9 +177,47 @@ impl<'a> Iterator for PatchIterator<'a> {
 }
 
 
+impl PatchGenerator {
+
+    /// construct a new patch generator over an array
+    pub fn new(array_size:[usize;3],patch_size:[usize;3],strides:[usize;3]) -> Self {
+        array_size.iter().zip(patch_size.iter()).for_each(|(x,p)|{
+            assert!(x >= p, "patch dimensions must be less than or equal to array dimensions")
+        });
+        array_size.iter().zip(strides.iter()).for_each(|(x,p)|{
+            assert!(x >= p, "stride sizes must be less than or equal to array dimensions")
+        });
+        Self {
+            x: CircularWindow1D::new(array_size[0],patch_size[0],strides[0]),
+            y: CircularWindow1D::new(array_size[1],patch_size[1],strides[1]),
+            z: CircularWindow1D::new(array_size[2],patch_size[2],strides[2]),
+        }
+    }
+
+    /// returns the nth patch index values
+    pub fn nth(&self,patch_idx:usize) -> Option<Vec<usize>> {
+        self.iter().nth(patch_idx)
+    }
+
+    /// returns the number of entries of a patch
+    pub fn patch_size(&self) -> usize {
+        self.x.window_len * self.y.window_len * self.z.window_len
+    }
+
+    /// returns the total number of patches to generate
+    pub fn n_patches(&self) -> usize {
+        self.x.n_iter() * self.y.n_iter() * self.z.n_iter()
+    }
+
+    /// return an iterator over all patches
+    pub fn iter(&self) -> PatchIterator {
+        self.into_iter()
+    }
+
+}
 
 #[derive(Debug,Clone)]
-pub struct CircularWindow1D {
+struct CircularWindow1D {
     array_len:usize,
     window_len: usize,
     stride: usize,
@@ -208,14 +225,14 @@ pub struct CircularWindow1D {
 
 impl CircularWindow1D {
 
-    pub fn new(array_len:usize,window_len:usize,stride:usize) -> Self {
+    fn new(array_len:usize,window_len:usize,stride:usize) -> Self {
         Self {
             array_len,
             window_len,
             stride,
         }
     }
-    pub fn nth(&self,stride_idx:usize) -> Option<Vec<usize>> {
+    fn nth(&self,stride_idx:usize) -> Option<Vec<usize>> {
         let mut buffer = vec![0;self.window_len];
         if stride_idx < self.n_iter() {
             let start = stride_idx * self.stride;
@@ -229,7 +246,7 @@ impl CircularWindow1D {
         }
     }
 
-    pub fn n_iter(&self) -> usize {
+    fn n_iter(&self) -> usize {
         ceiling_div(self.array_len, self.stride)
     }
 }
@@ -245,7 +262,7 @@ impl CircularWindow1D {
 }
 
 #[derive(Debug,Clone)]
-pub struct CircularWindowIterator<'a> {
+struct CircularWindowIterator<'a> {
     window: &'a CircularWindow1D,
     stride_index: usize,
     n_iter:usize,
@@ -270,8 +287,4 @@ impl<'a> Iterator for CircularWindowIterator<'a> {
             None
         }
     }
-}
-
-fn ceiling_div(a:usize,b:usize) -> usize {
-    (a + b - 1) / b
 }
