@@ -11,7 +11,7 @@ mod tests {
 
     use std::time::Instant;
 
-    use cfl::{ndarray::{Array3, ArrayD, Axis, Ix2, Ix3, ShapeBuilder}, CflReader, CflWriter};
+    use cfl::{ndarray::{Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
     use ndarray_linalg::{c32, SVD};
     use cfl::num_complex::Complex32;
     use crate::{ceiling_div, patch_generator::PatchGenerator, singular_value_threshold};
@@ -34,7 +34,7 @@ mod tests {
         // construct a collection of cfl volume readers called a data set
         let mut data_set = vec![];
         for i in 0..67 {
-            let filename = format!("/Users/Wyatt/scratch/4D_test_data/raw/i{:02}",i);
+            let filename = format!("/home/wyatt/test_data/raw/i{:02}",i);
             data_set.push(
                 CflReader::new(filename).unwrap()
             )
@@ -43,18 +43,17 @@ mod tests {
         println!("preparing output files ...");
         let mut data_set_write = vec![];
         for i in 0..67 {
-            let filename = format!("/Users/Wyatt/scratch/4D_test_data/raw/i{:02}_out",i);
+            let filename = format!("/home/wyatt/test_data/raw/out/o{:02}",i);
             data_set_write.push(
                 CflWriter::new(filename,&dims).unwrap()
             )
         }
 
         // construct a patch generator for patch data extraction
-        let patch_gen = PatchGenerator::new(dims, [10,10,10], [10,10,10]);
+        let patch_gen = PatchGenerator::new(dims, [10,10,10], [9,9,9]);
 
         // define the number of patches to extract in this batch
         let patch_batch_size = 500;
-
 
         let n_batches = patch_gen.n_patches() / patch_batch_size;
         let remainder = patch_gen.n_patches() % patch_batch_size;
@@ -78,8 +77,11 @@ mod tests {
             });
 
             //println!("processing patches ...");
-            singular_value_threshold(&mut patch_data, 200.);
+            singular_value_threshold(&mut patch_data, 10);
             //println!("writing patches ...");
+
+            // integrate the values in the file
+            let write_operation = |a,b| a + b;
 
             patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
                 // get the patch index values, shared over all volumes in data set
@@ -87,7 +89,7 @@ mod tests {
                 // iterate over each volume, assigning patch data to a single column
                 for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(data_set_write.iter_mut()) {
                     // write_from uses memory mapping internally to help with random indexing of volume files
-                    vol.write_from(&patch_indices, col.as_slice_memory_order_mut().unwrap()).unwrap()
+                    vol.write_op_from(&patch_indices, col.as_slice_memory_order_mut().unwrap(),write_operation).unwrap()
                 }
             });
 
@@ -104,7 +106,7 @@ mod tests {
 }
 
 
-fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:f32) {
+fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:usize) {
 
     let m = patch_data.shape()[0];
     let n = patch_data.shape()[1];
@@ -122,7 +124,7 @@ fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:f32) {
         let (u,mut s,v) = matrix.svd(true, true).unwrap();
 
         //s.map_inplace(|val| if *val < threshold {*val = 0.});
-        s.iter_mut().enumerate().for_each(|(i,val)| if i > 0 {*val = 0.});
+        s.iter_mut().enumerate().for_each(|(i,val)| if i >= threshold {*val = 0.});
 
         let u = u.unwrap();
         let v = v.unwrap();

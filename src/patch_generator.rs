@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+
+use indicatif::ProgressStyle;
+
 use crate::ceiling_div;
 
 #[cfg(test)]
@@ -8,7 +12,10 @@ mod tests {
     use crate::patch_generator::PatchGenerator;
     use cfl::ndarray::{ArrayD,ShapeBuilder};
     use cfl::num_complex::Complex32;
+    use indicatif::ProgressStyle;
     use rand::Rng;
+
+    use super::partition_patch_ids;
 
     //cargo test --release --package kmppca --lib -- patch_generator::tests::patch_decomposition_reconstruction--exact --nocapture
     #[test]
@@ -67,44 +74,52 @@ mod tests {
 
     #[test]
     fn non_overlapping_patches() {
-
-        let patch_generator = PatchGenerator::new([512,512,512],[2,2,2],[2,2,2]);
-
-        let mut partitioned_patch_ids:Vec<Vec<usize>> = vec![vec![]];
-        let mut partition_entries:Vec<HashSet<usize>> = vec![HashSet::new()];
-
-        for (patch_index,patch_entries) in patch_generator.iter().enumerate() {
-
-            let mut patch_entries = HashSet::from_iter(patch_entries.into_iter());
-
-            // try to find a partition for the patch, draining the patch if one is found
-            for (partition_entry,patch_ids) in partition_entries.iter_mut().zip(partitioned_patch_ids.iter_mut()) {
-                if partition_entry.is_disjoint(&patch_entries) {
-                    partition_entry.extend(patch_entries.drain());
-                    patch_ids.push(patch_index);
-                    break
-                }
-            };
-
-            // if the patch has not been drained because no suitable partition was found,
-            // create a new partition
-            if !patch_entries.is_empty() {
-                partition_entries.push(
-                    HashSet::from_iter(patch_entries.into_iter())
-                );
-                partitioned_patch_ids.push(vec![patch_index]);
-            }
-
-        }
-
-        for partition in partitioned_patch_ids {
+        let patch_generator = PatchGenerator::new([4,4,4],[3,3,3],[2,2,2]);
+        let partitions = partition_patch_ids(&patch_generator);
+        for partition in partitions {
             println!("{:?}",partition)
         }
-
-        
-
-
     }
+}
+
+/// partitions patch ids such that each partion is garaunteed to operate
+/// over the image volume in a non-overlapping manner. This is useful for splitting
+/// work over multiple concurrent processes
+fn partition_patch_ids(patch_generator:&PatchGenerator) -> Vec<Vec<usize>> {
+
+    let mut partitioned_patch_ids:Vec<Vec<usize>> = vec![vec![]];
+    let mut partition_entries:Vec<HashSet<usize>> = vec![HashSet::new()];
+
+    let prog_bar = indicatif::ProgressBar::new(patch_generator.n_patches() as u64);
+    prog_bar.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}").unwrap()
+            .progress_chars("=>-")
+    );
+    
+    for (patch_index,patch_entries) in patch_generator.iter().enumerate() {
+        let mut patch_entries = HashSet::from_iter(patch_entries.into_iter());
+        // try to find a partition for the patch, draining the patch if one is found
+        for (partition_entry,patch_ids) in partition_entries.iter_mut().zip(partitioned_patch_ids.iter_mut()) {
+            if partition_entry.is_disjoint(&patch_entries) {
+                partition_entry.extend(patch_entries.drain());
+                patch_ids.push(patch_index);
+                break
+            }
+        };
+        // if the patch has not been drained because no suitable partition was found,
+        // create a new partition
+        if !patch_entries.is_empty() {
+            partition_entries.push(
+                HashSet::from_iter(patch_entries.into_iter())
+            );
+            partitioned_patch_ids.push(vec![patch_index]);
+        }
+        prog_bar.inc(1);
+    }
+    prog_bar.finish();
+
+    partitioned_patch_ids
 }
 
 pub struct PatchGenerator {
