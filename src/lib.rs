@@ -11,10 +11,10 @@ mod tests {
 
     use std::time::Instant;
 
-    use cfl::{ndarray::{Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
+    use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, ParallelIterator}, Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
     use ndarray_linalg::{c32, SVD};
     use cfl::num_complex::Complex32;
-    use crate::{ceiling_div, patch_generator::PatchGenerator, singular_value_threshold};
+    use crate::{ceiling_div, patch_generator::PatchGenerator, phase_correct_volume, singular_value_threshold};
 
     #[test]
     fn it_works() {
@@ -29,12 +29,24 @@ mod tests {
     //cargo test --release --package kmppca --lib -- tests::vol_reader --exact --nocapture
     #[test]
     fn vol_reader() {
-        let dims = [197,120,120];
+
+        let now = Instant::now();
+        let dims = [788,480,480];
+
+        println!("calculating phase operators ...");
+
+        // (19..67).into_par_iter().for_each(|i|{
+        //     println!("working on {} of 67 ...",i+1);
+        //     let cfl_in = format!("/home/wyatt/test_data/kspace/im{}",i);
+        //     let cfl_out = format!("/home/wyatt/test_data/kspace/im_pc{}",i);
+        //     let phase_op_out = format!("/home/wyatt/test_data/kspace/im_phase{}",i);
+        //     phase_correct_volume(cfl_in, cfl_out, phase_op_out);
+        // });
 
         // construct a collection of cfl volume readers called a data set
         let mut data_set = vec![];
         for i in 0..67 {
-            let filename = format!("/home/wyatt/test_data/raw/i{:02}",i);
+            let filename = format!("/home/wyatt/test_data/kspace/im_pc{}",i);
             data_set.push(
                 CflReader::new(filename).unwrap()
             )
@@ -43,17 +55,18 @@ mod tests {
         println!("preparing output files ...");
         let mut data_set_write = vec![];
         for i in 0..67 {
-            let filename = format!("/home/wyatt/test_data/raw/out/o{:02}",i);
+            let filename = format!("/home/wyatt/test_data/kspace/out{}",i);
             data_set_write.push(
                 CflWriter::new(filename,&dims).unwrap()
+                //CflWriter::open(filename).unwrap()
             )
         }
 
         // construct a patch generator for patch data extraction
-        let patch_gen = PatchGenerator::new(dims, [10,10,10], [9,9,9]);
+        let patch_gen = PatchGenerator::new(dims, [10,10,10], [10,10,10]);
 
         // define the number of patches to extract in this batch
-        let patch_batch_size = 500;
+        let patch_batch_size = 2000;
 
         let n_batches = patch_gen.n_patches() / patch_batch_size;
         let remainder = patch_gen.n_patches() % patch_batch_size;
@@ -98,8 +111,10 @@ mod tests {
 
         // construct the patch data array, initialized to ones
 
+        let dur = now.elapsed();
         println!("done.");
-
+        println!("took {} sec",dur.as_secs_f64());
+    
     }
     
 
@@ -140,8 +155,14 @@ fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:usize) 
     //prog_bar.finish_with_message("done");
 }
 
-
-
 pub fn ceiling_div(a:usize,b:usize) -> usize {
     (a + b - 1) / b
+}
+
+fn phase_correct_volume<P:AsRef<Path>>(cfl_in:P,cfl_out:P, phase_op_out:P) {
+    let x = cfl::to_array(cfl_in, true).unwrap();
+    let w = fft::window_functions::HanningWindow::new(x.shape());
+    let (pc,phase) = image_utils::unwrap_phase::phase_correct(&x,Some(&w));
+    cfl::from_array(cfl_out, &pc).unwrap();
+    cfl::from_array(phase_op_out, &phase).unwrap();
 }
