@@ -1,7 +1,7 @@
 pub mod patch_generator;
 use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek}, mem::size_of, path::Path};
 
-use cfl::{ndarray::{Array2, Array3, Axis}, num_complex::{Complex, Complex32}};
+use cfl::{ndarray::{Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
 use indicatif::ProgressStyle;
 use ndarray_linalg::{c32, SVDInplace, SVD};
 use patch_generator::PatchGenerator;
@@ -14,7 +14,7 @@ mod tests {
     use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, ParallelIterator}, Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
     use ndarray_linalg::{c32, SVD};
     use cfl::num_complex::Complex32;
-    use crate::{ceiling_div, patch_generator::PatchGenerator, phase_correct_volume, singular_value_threshold};
+    use crate::{ceiling_div, patch_generator::PatchGenerator, phase_correct_volume, singular_value_threshold_mppca};
 
     #[test]
     fn it_works() {
@@ -31,7 +31,7 @@ mod tests {
     fn vol_reader() {
 
         let now = Instant::now();
-        let dims = [788,480,480];
+        let dims = [788,28800,1];
 
         println!("calculating phase operators ...");
 
@@ -46,7 +46,7 @@ mod tests {
         // construct a collection of cfl volume readers called a data set
         let mut data_set = vec![];
         for i in 0..67 {
-            let filename = format!("/home/wyatt/test_data/kspace/im_pc{}",i);
+            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/object-data/k{}/k0",i);
             data_set.push(
                 CflReader::new(filename).unwrap()
             )
@@ -55,7 +55,7 @@ mod tests {
         println!("preparing output files ...");
         let mut data_set_write = vec![];
         for i in 0..67 {
-            let filename = format!("/home/wyatt/test_data/kspace/out{}",i);
+            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/c{}/",i);
             data_set_write.push(
                 CflWriter::new(filename,&dims).unwrap()
                 //CflWriter::open(filename).unwrap()
@@ -63,10 +63,11 @@ mod tests {
         }
 
         // construct a patch generator for patch data extraction
-        let patch_gen = PatchGenerator::new(dims, [10,10,10], [10,10,10]);
+        let patch_gen = PatchGenerator::new(dims, [788,10,1], [788,10,1]);
 
+        
         // define the number of patches to extract in this batch
-        let patch_batch_size = 2000;
+        let patch_batch_size = 1;
 
         let n_batches = patch_gen.n_patches() / patch_batch_size;
         let remainder = patch_gen.n_patches() % patch_batch_size;
@@ -90,7 +91,7 @@ mod tests {
             });
 
             //println!("processing patches ...");
-            singular_value_threshold(&mut patch_data, 10);
+            singular_value_threshold_mppca(&mut patch_data, None);
             //println!("writing patches ...");
 
             // integrate the values in the file
@@ -121,7 +122,7 @@ mod tests {
 }
 
 
-fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:usize) {
+fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option<usize>) {
 
     let m = patch_data.shape()[0];
     let n = patch_data.shape()[1];
@@ -138,8 +139,14 @@ fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:usize) 
     patch_data.axis_iter_mut(Axis(2)).for_each(|mut matrix| {
         let (u,mut s,v) = matrix.svd(true, true).unwrap();
 
-        //s.map_inplace(|val| if *val < threshold {*val = 0.});
-        s.iter_mut().enumerate().for_each(|(i,val)| if i >= threshold {*val = 0.});
+        let thresh = if let Some(rank) = rank {
+            rank
+        }else {
+            let (t_idx,_) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
+            t_idx
+        };
+        
+        s.iter_mut().enumerate().for_each(|(i,val)| if i >= thresh {*val = 0.});
 
         let u = u.unwrap();
         let v = v.unwrap();
@@ -152,7 +159,6 @@ fn singular_value_threshold(patch_data:&mut Array3<Complex32>, threshold:usize) 
         prog_bar.inc(1);
     });
     prog_bar.finish();
-    //prog_bar.finish_with_message("done");
 }
 
 pub fn ceiling_div(a:usize,b:usize) -> usize {
@@ -165,4 +171,102 @@ fn phase_correct_volume<P:AsRef<Path>>(cfl_in:P,cfl_out:P, phase_op_out:P) {
     let (pc,phase) = image_utils::unwrap_phase::phase_correct(&x,Some(&w));
     cfl::from_array(cfl_out, &pc).unwrap();
     cfl::from_array(phase_op_out, &phase).unwrap();
+}
+
+/*
+function x_denoised = denoise_mppca(x)
+[U,S,V]=svd(x,'econ');
+S=diag(S);
+MM=size(x,1);
+NNN=size(x,2);
+R = min(MM, NNN);
+scaling = (max(MM, NNN) - (0:R-1)) / NNN;
+scaling = scaling(:);
+vals=S;
+vals = (vals).^2 / NNN;
+% First estimation of Sigma^2;  Eq 1 from ISMRM presentation
+csum = cumsum(vals(R:-1:1));
+cmean = csum(R:-1:1)./(R:-1:1)';
+sigmasq_1 = cmean./scaling;
+% Second estimation of Sigma^2; Eq 2 from ISMRM presentation
+gamma = (MM - (0:R-1)) / NNN;
+rangeMP = 4*sqrt(gamma(:));
+rangeData = vals(1:R) - vals(R);
+sigmasq_2 = rangeData./rangeMP;
+t = find(sigmasq_2 < sigmasq_1, 1);
+%sigmasq_2(t)
+energy_scrub=sqrt(sum(S.^1)).\sqrt(sum(S(t:end).^1));
+S(t:end)=0;
+x_denoised = U * diag(S) * V';
+*/
+
+/// returns the index of the singular value to threshold, along with the estimated matrix variance of the matrix
+fn marchenko_pastur_singular_value(singular_values:&[f32],m:usize,n:usize) -> (usize,f32) {
+    
+    let r = m.min(n);
+    let mut vals = singular_values.to_owned();
+
+    let scaling:Vec<_> = (0..r).clone().map(|x| (m.max(n) as f32 - x as f32) / n as f32).collect();
+    
+    vals.iter_mut().for_each(|x| *x = x.powi(2) / n as f32);
+    vals.reverse();
+    let mut csum = cumsum(&vals);
+    csum.reverse();
+    vals.reverse();
+
+    let cmean:Vec<_> = csum.iter().zip((1..r+1).rev()).map(|(x,y)| x / y as f32).collect();
+    let sigmasq_1:Vec<_> = cmean.iter().zip(scaling.iter()).map(|(x,y)| *x / *y).collect();
+    let range_mp:Vec<_> = (0..r).map(|x| x as f32).map(|x| (m as f32 - x) /  n as f32).map(|x| x.sqrt() * 4.).collect();
+    let range_data:Vec<_> = vals[0..r].iter().map(|x| x - vals[r-1]).collect();
+    let sigmasq_2:Vec<_> = range_data.into_iter().zip(range_mp).map(|(x,y)|x / y).collect();
+
+    let idx = sigmasq_1.iter().zip(sigmasq_2).enumerate().find_map(|(i,(s1,s2))|{
+        if s2 < *s1 {
+            Some(i)
+        }else {
+            None
+        }
+    }).unwrap();
+
+    let variance_estimate = sigmasq_1[idx];
+
+    (idx,variance_estimate)
+}
+
+
+fn cumsum(x:&[f32]) -> Vec<f32> {
+    let mut x = x.to_owned();
+    let mut s = 0.;
+    x.iter_mut().for_each(|val|{
+        *val += s;
+        s = *val;
+    });
+    x
+}
+
+#[test]
+fn cumsum_test() {
+    let x = cumsum(&[1.,2.,3.,4.]);
+    println!("{:?}",x);
+}
+
+#[test]
+fn mp_test() {
+
+    let matrix_entries:Vec<f32> = vec![
+        -0.1337,2.0024,0.8491,2.1531,
+        0.4786,0.2538,0.5708,-0.2315
+    ];
+
+    let matrix = Array2::from_shape_vec((4usize,2usize).f(), matrix_entries).unwrap();
+    println!("{:?}",matrix);
+    let (u,s,vt) = matrix.svd(true,true).unwrap();
+
+    let s = s.to_vec();
+
+    let (i,var) = marchenko_pastur_singular_value(&s, 4, 2);
+
+    println!("var: {}",var);
+
+
 }
