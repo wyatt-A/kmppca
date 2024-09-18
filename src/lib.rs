@@ -31,22 +31,22 @@ mod tests {
     fn vol_reader() {
 
         let now = Instant::now();
-        let dims = [788,28800,1];
+        let dims = [10,480,480];
 
         println!("calculating phase operators ...");
 
-        // (19..67).into_par_iter().for_each(|i|{
+        // (0..67).into_par_iter().for_each(|i|{
         //     println!("working on {} of 67 ...",i+1);
-        //     let cfl_in = format!("/home/wyatt/test_data/kspace/im{}",i);
-        //     let cfl_out = format!("/home/wyatt/test_data/kspace/im_pc{}",i);
-        //     let phase_op_out = format!("/home/wyatt/test_data/kspace/im_phase{}",i);
+        //     let cfl_in = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr{}",i);
+        //     let cfl_out = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_pc{}",i);
+        //     let phase_op_out = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_phase{}",i);
         //     phase_correct_volume(cfl_in, cfl_out, phase_op_out);
         // });
 
         // construct a collection of cfl volume readers called a data set
         let mut data_set = vec![];
         for i in 0..67 {
-            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/object-data/k{}/k0",i);
+            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_pc{}",i);
             data_set.push(
                 CflReader::new(filename).unwrap()
             )
@@ -55,7 +55,7 @@ mod tests {
         println!("preparing output files ...");
         let mut data_set_write = vec![];
         for i in 0..67 {
-            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/c{}/",i);
+            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_d{}",i);
             data_set_write.push(
                 CflWriter::new(filename,&dims).unwrap()
                 //CflWriter::open(filename).unwrap()
@@ -63,11 +63,10 @@ mod tests {
         }
 
         // construct a patch generator for patch data extraction
-        let patch_gen = PatchGenerator::new(dims, [788,10,1], [788,10,1]);
+        let patch_gen = PatchGenerator::new(dims, [10,10,10], [10,5,5]);
 
-        
         // define the number of patches to extract in this batch
-        let patch_batch_size = 1;
+        let patch_batch_size = 2000;
 
         let n_batches = patch_gen.n_patches() / patch_batch_size;
         let remainder = patch_gen.n_patches() % patch_batch_size;
@@ -92,6 +91,7 @@ mod tests {
 
             //println!("processing patches ...");
             singular_value_threshold_mppca(&mut patch_data, None);
+            //singular_value_threshold_mppca(&mut patch_data, Some(4));
             //println!("writing patches ...");
 
             // integrate the values in the file
