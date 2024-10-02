@@ -754,6 +754,7 @@ name = "kmppca"
 version = "0.1.0"
 dependencies = [
  "array_utils",
+ "bincode",
  "byte-order",
  "cfl",
  "fft",
@@ -761,6 +762,7 @@ dependencies = [
  "indicatif",
  "ndarray-linalg",
  "rand",
+ "serde",
 ]
 
 [[package]]

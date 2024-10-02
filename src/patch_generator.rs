@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use indicatif::ProgressStyle;
+use serde::{Deserialize, Serialize};
 
 use crate::ceiling_div;
 
@@ -74,7 +75,7 @@ mod tests {
 
     #[test]
     fn non_overlapping_patches() {
-        let patch_generator = PatchGenerator::new([4,4,4],[3,3,3],[2,2,2]);
+        let patch_generator = PatchGenerator::new([4,4,4],[2,2,2],[2,2,2]);
         let partitions = partition_patch_ids(&patch_generator);
         for partition in partitions {
             println!("{:?}",partition)
@@ -84,8 +85,8 @@ mod tests {
 
 /// partitions patch ids such that each partion is garaunteed to operate
 /// over the image volume in a non-overlapping manner. This is useful for splitting
-/// work over multiple concurrent processes
-fn partition_patch_ids(patch_generator:&PatchGenerator) -> Vec<Vec<usize>> {
+/// work over multiple concurrent processes without having to deal with race conditions
+pub fn partition_patch_ids(patch_generator:&PatchGenerator) -> Vec<Vec<usize>> {
 
     let mut partitioned_patch_ids:Vec<Vec<usize>> = vec![vec![]];
     let mut partition_entries:Vec<HashSet<usize>> = vec![HashSet::new()];
@@ -115,13 +116,18 @@ fn partition_patch_ids(patch_generator:&PatchGenerator) -> Vec<Vec<usize>> {
             );
             partitioned_patch_ids.push(vec![patch_index]);
         }
-        prog_bar.inc(1);
+
+        if patch_index % 100 == 0 {
+            prog_bar.inc(100);
+        }
+        
     }
     prog_bar.finish();
 
     partitioned_patch_ids
 }
 
+#[derive(Serialize,Deserialize)]
 pub struct PatchGenerator {
     x: CircularWindow1D,
     y: CircularWindow1D,
@@ -274,7 +280,7 @@ impl PatchGenerator {
 
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,Serialize,Deserialize)]
 struct CircularWindow1D {
     array_len:usize,
     window_len: usize,
