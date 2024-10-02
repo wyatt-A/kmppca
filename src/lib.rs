@@ -39,16 +39,16 @@ mod tests {
 
         // (0..67).into_par_iter().for_each(|i|{
         //     println!("working on {} of 67 ...",i+1);
-        //     let cfl_in = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr{}",i);
-        //     let cfl_out = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_pc{}",i);
-        //     let phase_op_out = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_phase{}",i);
+        //     let cfl_in = format!("/home/wyatt/test_data/kspace/c{}",i);
+        //     let cfl_out = format!("/home/wyatt/test_data/kspace/pc{}",i);
+        //     let phase_op_out = format!("/home/wyatt/test_data/kspace/po{}",i);
         //     phase_correct_volume(cfl_in, cfl_out, phase_op_out);
         // });
 
         // construct a collection of cfl volume readers called a data set
         let mut data_set = vec![];
         for i in 0..67 {
-            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_pc{}",i);
+            let filename = format!("/home/wyatt/test_data/kspace/pc{}",i);
             data_set.push(
                 CflReader::new(filename).unwrap()
             )
@@ -57,7 +57,7 @@ mod tests {
         println!("preparing output files ...");
         let mut data_set_write = vec![];
         for i in 0..67 {
-            let filename = format!("/Users/Wyatt/scratch/se_kspace_data/ksp/cr_d{}",i);
+            let filename = format!("/home/wyatt/test_data/kspace/cd{}",i);
             data_set_write.push(
                 CflWriter::new(filename,&dims).unwrap()
                 //CflWriter::open(filename).unwrap()
