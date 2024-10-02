@@ -1,11 +1,12 @@
 pub mod patch_generator;
 use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek}, mem::size_of, path::{Path, PathBuf}};
 
-use cfl::{ndarray::{Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
+use cfl::{ndarray::{parallel::prelude::IntoParallelIterator, Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
 use indicatif::ProgressStyle;
 use ndarray_linalg::{c32, SVDInplace, SVD};
 use patch_generator::PatchGenerator;
 use serde::{Deserialize, Serialize};
+use cfl::ndarray::parallel::prelude::ParallelIterator;
 
 #[cfg(test)]
 mod tests {
@@ -124,18 +125,18 @@ mod tests {
     #[test]
     fn test_denoise() {
 
-        let volume_dims = [256,256,256];
-        let n_computers = 6;
+        let volume_dims = [788,480,480];
+        let n_computers = 1;
         let n_volumes = 67;
         let patch_size = [10,10,10];
-        let patch_stride = [5,5,5];
+        let patch_stride = [10,10,10];
         let cfl_dir = "/privateShares/wa41/24.chdi.01.test/240725-3-1";
 
         // check if input files exist
         let input_files:Vec<_> = (0..n_volumes).map(|idx|{
-            let p = Path::new(cfl_dir).join(format!("i{}",idx));
+            let p = Path::new(cfl_dir).join(format!("i{}.cfl",idx));
             if !p.exists() {
-                panic!("file not found");
+                panic!("file not found {:?}",p);
             }
             p
         }).collect();
@@ -218,9 +219,15 @@ mod tests {
         println!("n total patches = {}",n_patches_to_process);
         
         let mut writers:Vec<_> = plan.output_volumes.iter().map(|path| CflWriter::open(path).unwrap()).collect();
-        let readers:Vec<_> = plan.input_volumes.iter().map(|path| CflReader::new(path).unwrap()).collect();
+        let readers:Vec<_> = plan.input_volumes.iter().map(|path|{
+            println!("cfl base: {:?}",path);
+            CflReader::new(path).unwrap()
+        } ).collect();
 
-        for batch in patches_to_process.chunks(batch_size) {
+        for (batch_id,batch) in patches_to_process.chunks(batch_size).enumerate() {
+
+            println!("loading data for batch {} of {} ...",batch_id+1,n_batches);
+
             let mut patch_data = Array3::from_elem((plan.patch_generator.patch_size(),n_volumes,batch.len()).f(), Complex32::ZERO);
             patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
                 // get the patch index values, shared over all volumes in data set
@@ -232,10 +239,12 @@ mod tests {
                 }
             });
 
-            singular_value_threshold_mppca(&mut patch_data, Some(8));
+            println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
+            singular_value_threshold_mppca(&mut patch_data, Some(1));
 
             let write_operation = |a,b| a + b;
 
+            println!("writing data for batch {} of {} ...",batch_id+1,n_batches);
             patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
                 // get the patch index values, shared over all volumes in data set
                 let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
@@ -263,19 +272,12 @@ struct Plan {
     output_volumes:Vec<PathBuf>,
 }
 
-impl Plan {
-    pub fn index(&self,batch:usize,computer:usize,patch:usize) -> usize {
-        self.plan_data[batch][computer][patch]
-    }
-}
-
-
 fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option<usize>) {
 
     let m = patch_data.shape()[0];
     let n = patch_data.shape()[1];
 
-    let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
+    
     
     let prog_bar = indicatif::ProgressBar::new(patch_data.shape()[2] as u64);
     prog_bar.set_style(
@@ -284,7 +286,11 @@ fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option
             .progress_chars("=>-")
     );
     
-    patch_data.axis_iter_mut(Axis(2)).for_each(|mut matrix| {
+
+    patch_data.axis_iter_mut(Axis(2)).into_par_iter().for_each(|mut matrix| {
+
+        let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
+
         let (u,mut s,v) = matrix.svd(true, true).unwrap();
 
         let thresh = if let Some(rank) = rank {

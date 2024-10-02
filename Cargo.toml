@@ -8,7 +8,7 @@ cfl = {path = "../civm_scan/cfl"}
 fft = {path = "../civm_scan/fft"}
 image_utils = {path = "../civm_scan/image_utils"}
 #ndarray = {version = "0.15.6", features = ["rayon"] }
-ndarray-linalg = {version = "0.15.0",features = ["openblas-system"]}
+ndarray-linalg = {version = "0.15.0",features = ["netlib-system"]}
 array_utils = {path = "../civm_scan/array_utils"}
 rand = "0.8.5"
 byte-order = "0.3.0"
