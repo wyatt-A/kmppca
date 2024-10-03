@@ -667,6 +667,7 @@ dependencies = [
  "bincode",
  "byte-order",
  "cfl",
+ "civm_rust_utils",
  "clap",
  "fft",
  "image_utils",
@@ -674,6 +675,7 @@ dependencies = [
  "ndarray-linalg",
  "rand",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

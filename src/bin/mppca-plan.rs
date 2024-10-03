@@ -7,11 +7,11 @@ struct Args {
     plan_file_out:PathBuf,
     n_volumes:usize,
     n_processes:usize,
-    #[clap(value_delimiter = ',',short = 'd')]
+    #[clap(short = 'd')]
     volume_dims:Vec<usize>,
-    #[clap(value_delimiter = ',',short = 'p')]
+    #[clap(short = 'p')]
     patch_size:Vec<usize>,
-    #[clap(value_delimiter = ',',short = 's')]
+    #[clap(short = 's')]
     patch_stride:Vec<usize>,
 }
 

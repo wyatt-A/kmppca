@@ -1,12 +1,13 @@
 pub mod patch_generator;
 use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek, Write}, mem::size_of, path::{Path, PathBuf}};
-
 use cfl::{ndarray::{parallel::prelude::IntoParallelIterator, Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
 use indicatif::ProgressStyle;
 use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD};
 use patch_generator::{partition_patch_ids, PatchGenerator};
 use serde::{Deserialize, Serialize};
 use cfl::ndarray::parallel::prelude::ParallelIterator;
+pub mod slurm;
+
 
 #[cfg(test)]
 mod tests {

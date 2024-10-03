@@ -35,7 +35,6 @@ fn main() {
     for (batch_id,batch) in patches_to_process.chunks(config.batch_size).enumerate() {
 
         println!("loading patch data for batch {} of {} ...",batch_id+1,n_batches);
-
         let mut patch_data = Array3::from_elem((plan.patch_generator.patch_size(),plan.n_volumes,batch.len()).f(), Complex32::ZERO);
         patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
             // get the patch index values, shared over all volumes in data set
@@ -56,7 +55,7 @@ fn main() {
             let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
             // iterate over each volume, assigning patch data to a single column
             for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(writers.iter_mut()) {
-                // write_from uses memory mapping internally to help with random indexing of volume files
+                // write_from uses memory mapping internally to help with non-contiguous indexing of volume files
                 vol.write_op_from(&patch_indices, col.as_slice_memory_order_mut().unwrap(),write_operation).unwrap()
             }
         });
