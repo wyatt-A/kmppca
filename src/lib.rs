@@ -1,10 +1,10 @@
 pub mod patch_generator;
-use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek}, mem::size_of, path::{Path, PathBuf}};
+use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek, Write}, mem::size_of, path::{Path, PathBuf}};
 
 use cfl::{ndarray::{parallel::prelude::IntoParallelIterator, Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
 use indicatif::ProgressStyle;
-use ndarray_linalg::{c32, SVDInplace, SVD};
-use patch_generator::PatchGenerator;
+use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD};
+use patch_generator::{partition_patch_ids, PatchGenerator};
 use serde::{Deserialize, Serialize};
 use cfl::ndarray::parallel::prelude::ParallelIterator;
 
@@ -128,8 +128,8 @@ mod tests {
         let volume_dims = [788,480,480];
         let n_computers = 1;
         let n_volumes = 67;
-        let patch_size = [10,10,10];
-        let patch_stride = [10,10,10];
+        let patch_size = [20,20,20];
+        let patch_stride = [20,20,20];
         let cfl_dir = "/privateShares/wa41/24.chdi.01.test/240725-3-1";
 
         // check if input files exist
@@ -141,9 +141,11 @@ mod tests {
             p
         }).collect();
 
+        println!("pre-allocating output files ...");
         // pre-allocate output files
-        let output_files:Vec<_> = (0..n_volumes).map(|idx|{
+        let output_files:Vec<_> = (0..n_volumes).into_par_iter().map(|idx|{
             let p = Path::new(cfl_dir).join(format!("d{}",idx));
+            println!("pre-allocating {:?}",p);
             CflWriter::new(&p,&volume_dims).unwrap();
             p
         }).collect();
@@ -163,116 +165,192 @@ mod tests {
         println!("n partitions: {}",n_partitions);
 
         // build the plan
-        let mut concurrent_batches = vec![];
+        let mut partitioned_patch_chunks = vec![];
         for partition in partitioned_patches {
             // each of these partitions is safe to operate on in parallel because they do not
             // overlap
             let partition_chunk_size = ceiling_div(partition.len(), n_computers);
             let concurrent_work:Vec<_> = partition.chunks(partition_chunk_size).map( |chunk| chunk.to_vec() ).collect();
-            concurrent_batches.push(concurrent_work);
+            partitioned_patch_chunks.push(concurrent_work);
         }
 
-        println!("{}",concurrent_batches[0][0].len());
-        println!("{}",concurrent_batches[0].len());
-        println!("{}",concurrent_batches.len());
+        println!("{}",partitioned_patch_chunks[0][0].len());
+        println!("{}",partitioned_patch_chunks[0].len());
+        println!("{}",partitioned_patch_chunks.len());
 
         // save plan
         let plan = Plan {
-            plan_data: concurrent_batches,
+            plan_data: partitioned_patch_chunks,
             patch_generator,
             volume_dims,
-            input_volumes: input_files,
-            output_volumes: output_files,
+            n_volumes,
+            n_processes: n_computers,
         };
 
         let bytes = bincode::serialize(&plan).expect("failed to serialize plan");
-
         let mut f = File::create("plan").unwrap();
         f.write_all(&bytes).unwrap();
 
     }
     
     //cargo test --package kmppca --lib -- tests::test_launch --exact --nocapture
-    #[test]
-    fn test_launch() {
+    // #[test]
+    // fn test_launch() {
 
-        // we are given the computer index and batch from the array job
-        // and the
-        let computer_idx = 0;
-        let batch_index = 0;
-        let n_volumes = 67;
-        let batch_size = 2000;
+    //     // we are given the computer index and batch from the array job
+    //     // and the
+    //     let computer_idx = 0;
+    //     let batch_index = 0;
+    //     let n_volumes = 67;
+    //     let batch_size = 2000;
 
-        let mut f = File::open("plan").unwrap();
-        let mut byte_buff = vec![];
-        f.read_to_end(&mut byte_buff).unwrap();
-        let plan: Plan = bincode::deserialize(&byte_buff).unwrap();
+    //     let mut f = File::open("plan").unwrap();
+    //     let mut byte_buff = vec![];
+    //     f.read_to_end(&mut byte_buff).unwrap();
+    //     let plan: Plan = bincode::deserialize(&byte_buff).unwrap();
 
-        println!("plan len: {}",plan.plan_data.len());
+    //     println!("plan len: {}",plan.plan_data.len());
 
-        let patches_to_process = &plan.plan_data[batch_index][computer_idx];
-        let n_patches_to_process = patches_to_process.len();
+    //     let patches_to_process = &plan.plan_data[batch_index][computer_idx];
+    //     let n_patches_to_process = patches_to_process.len();
 
-        let n_batches = ceiling_div(n_patches_to_process, batch_size);
+    //     let n_batches = ceiling_div(n_patches_to_process, batch_size);
 
-        println!("n_batches = {}",n_batches);
-        println!("n total patches = {}",n_patches_to_process);
+    //     println!("n_batches = {}",n_batches);
+    //     println!("n total patches = {}",n_patches_to_process);
         
-        let mut writers:Vec<_> = plan.output_volumes.iter().map(|path| CflWriter::open(path).unwrap()).collect();
-        let readers:Vec<_> = plan.input_volumes.iter().map(|path|{
-            println!("cfl base: {:?}",path);
-            CflReader::new(path).unwrap()
-        } ).collect();
+    //     let mut writers:Vec<_> = plan.output_volumes.iter().map(|path| CflWriter::open(path).unwrap()).collect();
+    //     let readers:Vec<_> = plan.input_volumes.iter().map(|path|{
+    //         println!("cfl base: {:?}",path);
+    //         CflReader::new(path).unwrap()
+    //     } ).collect();
 
-        for (batch_id,batch) in patches_to_process.chunks(batch_size).enumerate() {
+    //     for (batch_id,batch) in patches_to_process.chunks(batch_size).enumerate() {
 
-            println!("loading data for batch {} of {} ...",batch_id+1,n_batches);
+    //         println!("loading data for batch {} of {} ...",batch_id+1,n_batches);
 
-            let mut patch_data = Array3::from_elem((plan.patch_generator.patch_size(),n_volumes,batch.len()).f(), Complex32::ZERO);
-            patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
-                // get the patch index values, shared over all volumes in data set
-                let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
-                // iterate over each volume, assigning patch data to a single column
-                for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(readers.iter()) {
-                    // read_into uses memory mapping internally to help with random indexing of volume files
-                    vol.read_into(&patch_indices, col.as_slice_memory_order_mut().unwrap()).unwrap()
-                }
-            });
+    //         let mut patch_data = Array3::from_elem((plan.patch_generator.patch_size(),n_volumes,batch.len()).f(), Complex32::ZERO);
+    //         patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
+    //             // get the patch index values, shared over all volumes in data set
+    //             let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
+    //             // iterate over each volume, assigning patch data to a single column
+    //             for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(readers.iter()) {
+    //                 // read_into uses memory mapping internally to help with random indexing of volume files
+    //                 vol.read_into(&patch_indices, col.as_slice_memory_order_mut().unwrap()).unwrap()
+    //             }
+    //         });
 
-            println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
-            singular_value_threshold_mppca(&mut patch_data, Some(1));
+    //         println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
+    //         singular_value_threshold_mppca(&mut patch_data, Some(1));
 
-            let write_operation = |a,b| a + b;
+    //         let write_operation = |a,b| a + b;
 
-            println!("writing data for batch {} of {} ...",batch_id+1,n_batches);
-            patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
-                // get the patch index values, shared over all volumes in data set
-                let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
-                // iterate over each volume, assigning patch data to a single column
-                for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(writers.iter_mut()) {
-                    // write_from uses memory mapping internally to help with random indexing of volume files
-                    vol.write_op_from(&patch_indices, col.as_slice_memory_order_mut().unwrap(),write_operation).unwrap()
-                }
-            });
+    //         println!("writing data for batch {} of {} ...",batch_id+1,n_batches);
+    //         patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
+    //             // get the patch index values, shared over all volumes in data set
+    //             let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
+    //             // iterate over each volume, assigning patch data to a single column
+    //             for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(writers.iter_mut()) {
+    //                 // write_from uses memory mapping internally to help with random indexing of volume files
+    //                 vol.write_op_from(&patch_indices, col.as_slice_memory_order_mut().unwrap(),write_operation).unwrap()
+    //             }
+    //         });
 
-        }
+    //     }
 
-    }
+    // }
 
 
 
 }
 
 #[derive(Serialize,Deserialize)]
-struct Plan {
-    patch_generator:PatchGenerator,
-    plan_data:Vec<Vec<Vec<usize>>>,
-    volume_dims:[usize;3],
-    input_volumes:Vec<PathBuf>,
-    output_volumes:Vec<PathBuf>,
+pub struct Plan {
+    pub patch_generator:PatchGenerator,
+    pub plan_data:Vec<Vec<Vec<usize>>>,
+    pub volume_dims:[usize;3],
+    pub n_volumes:usize,
+    pub n_processes:usize,
 }
 
-fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option<usize>) {
+impl Plan {
+    pub fn new(volume_dims:[usize;3],n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize) -> Self {
+        let patch_generator = PatchGenerator::new(volume_dims, patch_size, patch_stride);
+
+        let n_total_patches = patch_generator.n_patches();
+        println!("n total patches: {}",n_total_patches);
+
+        // partion the patch ids into groups of non-overlapping patches
+        println!("partitioning patch ids ...");
+        let partitioned_patches = partition_patch_ids(&patch_generator);
+
+        // we will probably want to cache this data because it is largly static
+        let n_partitions = partitioned_patches.len();
+        println!("n partitions: {}",n_partitions);
+
+        // build the plan
+        let mut partitioned_patch_chunks = vec![];
+        for partition in partitioned_patches {
+            // each of these partitions is safe to operate on in parallel because they do not
+            // overlap
+            let partition_chunk_size = ceiling_div(partition.len(), n_processes);
+            let concurrent_work:Vec<_> = partition.chunks(partition_chunk_size).map( |chunk| chunk.to_vec() ).collect();
+            partitioned_patch_chunks.push(concurrent_work);
+        }
+        
+        Self {
+            plan_data: partitioned_patch_chunks,
+            patch_generator,
+            volume_dims,
+            n_volumes,
+            n_processes,
+        }
+
+    }
+
+    pub fn to_file(&self,filename:impl AsRef<Path>) {
+        let bytes = bincode::serialize(self).expect("failed to serialize plan");
+        println!("writing to plan file {:?}",filename.as_ref());
+        let mut f = File::create(filename).expect("failed to create plan file");
+        f.write_all(&bytes).expect("failed to write to file");
+    }
+
+    pub fn from_file(filename:impl AsRef<Path>) -> Self {
+        let mut f = File::open(filename).expect("failed to open file");
+        let mut bytes = vec![];
+        f.read_to_end(&mut bytes).expect("failed to read file");
+        bincode::deserialize(&bytes).expect("failed to deserialize plan file")
+    }
+
+}
+
+#[derive(Serialize,Deserialize)]
+pub struct Config {
+    pub patch_plan_file:PathBuf,
+    pub input_files:Vec<PathBuf>,
+    pub output_files:Vec<PathBuf>,
+    pub batch_size:usize,
+}
+
+impl Config {
+
+    pub fn to_file(&self,filename:impl AsRef<Path>) {
+        let bytes = bincode::serialize(self).expect("failed to serialize plan");
+        println!("writing to config file {:?}",filename.as_ref());
+        let mut f = File::create(filename).expect("failed to create config file");
+        f.write_all(&bytes).expect("failed to write to file");
+    }
+
+    pub fn from_file(filename:impl AsRef<Path>) -> Self {
+        let mut f = File::open(filename).expect("failed to open file");
+        let mut bytes = vec![];
+        f.read_to_end(&mut bytes).expect("failed to read file");
+        bincode::deserialize(&bytes).expect("failed to deserialize config file")
+    }
+}
+
+
+pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option<usize>) {
 
     let m = patch_data.shape()[0];
     let n = patch_data.shape()[1];
@@ -291,16 +369,23 @@ fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option
 
         let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
 
+        //let (_,s,_) = matrix.svd(true, true).unwrap();
+        // let (_,sigma_sq) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
+        // matrix.par_mapv_inplace(|x| x / sigma_sq);
         let (u,mut s,v) = matrix.svd(true, true).unwrap();
+        let (rank,_) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
 
-        let thresh = if let Some(rank) = rank {
-            rank
-        }else {
-            let (t_idx,_) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
-            t_idx
-        };
+        // let thresh = if let Some(rank) = rank {
+        //     rank
+        // }else {
+        //     let (t_idx,sigma_sq) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
+
+        //     matrix.par_mapv_inplace(|x| x / sigma_sq);
+
+        //     t_idx
+        // };
         
-        s.iter_mut().enumerate().for_each(|(i,val)| if i >= thresh {*val = 0.});
+        s.iter_mut().enumerate().for_each(|(i,val)| if i >= rank {*val = 0.});
 
         let u = u.unwrap();
         let v = v.unwrap();
@@ -309,6 +394,7 @@ fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option
             &s.map(|x|Complex32::new(*x,0.))
         );
         let denoised_matrix = u.dot(&_s).dot(&v);
+        //denoised_matrix.par_mapv_inplace(|x| x * sigma_sq);
         matrix.assign(&denoised_matrix);
         prog_bar.inc(1);
     });
@@ -354,7 +440,7 @@ function x_denoised = denoise_mppca(x)
     x_denoised = U * diag(S) * V';
 */
 
-/// returns the index of the singular value to threshold, along with the estimated matrix variance of the matrix
+/// returns the index of the singular value to threshold, along with the estimated matrix variance
 fn marchenko_pastur_singular_value(singular_values:&[f32],m:usize,n:usize) -> (usize,f32) {
     
     let r = m.min(n);
