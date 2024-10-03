@@ -1,5 +1,5 @@
 pub mod patch_generator;
-use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek, Write}, mem::size_of, path::{Path, PathBuf}};
+use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek, Write}, mem::size_of, path::{Path, PathBuf}, sync::{Arc, Mutex}};
 use cfl::{ndarray::{parallel::prelude::IntoParallelIterator, Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
 use indicatif::ProgressStyle;
 use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD};
@@ -358,12 +358,14 @@ pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Op
 
     
     
-    let prog_bar = indicatif::ProgressBar::new(patch_data.shape()[2] as u64);
-    prog_bar.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}").unwrap()
-            .progress_chars("=>-")
-    );
+    // let prog_bar = indicatif::ProgressBar::new(patch_data.shape()[2] as u64);
+    // prog_bar.set_style(
+    //     ProgressStyle::default_bar()
+    //         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} {msg}").unwrap()
+    //         .progress_chars("=>-")
+    // );
+
+    let count = Arc::new(Mutex::new(0usize));
     
 
     patch_data.axis_iter_mut(Axis(2)).into_par_iter().for_each(|mut matrix| {
@@ -397,9 +399,12 @@ pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Op
         let denoised_matrix = u.dot(&_s).dot(&v);
         //denoised_matrix.par_mapv_inplace(|x| x * sigma_sq);
         matrix.assign(&denoised_matrix);
-        prog_bar.inc(1);
+        let mut g = count.lock().unwrap();  
+        *g += 1;
+        println!("{}",g);
+        //prog_bar.inc(1);
     });
-    prog_bar.finish();
+    //prog_bar.finish();
 }
 
 pub fn ceiling_div(a:usize,b:usize) -> usize {
