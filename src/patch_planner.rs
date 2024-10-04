@@ -1,11 +1,13 @@
+use ndarray_linalg::c32;
+
 use crate::ceiling_div;
+use crate::Complex32;
 
 struct PatchPlanner {
     patch_size:[usize;3],
     patch_stride:[usize;3],
     volume_size:[usize;3],
 }
-
 
 impl PatchPlanner {
     fn n_patches(&self) -> [usize;3] {
@@ -24,10 +26,6 @@ impl PatchPlanner {
         self.n_patches().into_iter().product()
     }
 
-    // fn n_patches_per_partition(&self) -> usize {
-    //     self.n_total_patches() / self.n_total_partitions()
-    // }
-
     // a partition contains no overlapping patches
     fn n_partitions(&self) -> [usize;3] {
         [
@@ -37,33 +35,30 @@ impl PatchPlanner {
         ]
     }
 
-    // fn patches_per_partition(&self) -> [usize;3] {
-    //     let n_patches = self.n_patches();
-    //     let n_partitions = self.n_partitions();
-    //     [
-    //         n_patches[0] / n_partitions[0],
-    //         n_patches[1] / n_partitions[1],
-    //         n_patches[2] / n_partitions[2],
-    //     ]
-    // }
-
     fn n_total_partitions(&self) -> usize {
         self.n_partitions().into_iter().product()
     }
 
 
-
+    // the stride of each patch within a partition
     fn partition_stride(&self) -> [usize;3] {
+
         [
-            2*self.patch_size[0] - self.patch_stride[0],
-            2*self.patch_size[1] - self.patch_stride[1],
-            2*self.patch_size[2] - self.patch_stride[2],
+            ceiling_div(self.patch_size[0], self.patch_stride[0]) * self.patch_stride[0],
+            ceiling_div(self.patch_size[1], self.patch_stride[1]) * self.patch_stride[1],
+            ceiling_div(self.patch_size[2], self.patch_stride[2]) * self.patch_stride[2],
         ]
+        
+        // [
+        //     2*self.patch_size[0] - self.patch_stride[0],
+        //     2*self.patch_size[1] - self.patch_stride[1],
+        //     2*self.patch_size[2] - self.patch_stride[2],
+        // ]
     }
 
 
     fn global_patch_subscr(&self,partition_subscr:[usize;3],local_patch_subscr:[usize;3]) -> [usize;3] {
-        let part_stride = self.n_partitions();
+        let part_stride = self.partition_stride();
         let partition_size = self.partition_size(partition_subscr);
 
         assert!(
@@ -85,24 +80,29 @@ impl PatchPlanner {
 
     fn vol_indices(&self,partition_subscr:[usize;3],local_patch_subscr:[usize;3],indices:&mut [usize]) {
         self.grid_subscript_to_grid_indices(
-            self.global_patch_subscript_to_grid_subscript(
+            //self.global_patch_subscript_to_grid_subscript(
                 self.global_patch_subscr(partition_subscr,local_patch_subscr)
-            )
             , indices
         );
     }
 
     /// size of the partition in units of patches
     fn partition_size(&self,partition_subscr:[usize;3]) -> [usize;3] {
-        let n_partitions = self.n_partitions();
         let partition_stride = self.partition_stride();
-        [
-            ceiling_div(self.volume_size[0] - partition_subscr[0] * n_partitions[0], partition_stride[0]),
-            ceiling_div(self.volume_size[1] - partition_subscr[1] * n_partitions[1], partition_stride[1]),
-            ceiling_div(self.volume_size[2] - partition_subscr[2] * n_partitions[2], partition_stride[2]),
-        ]
-    }
+        let padded_size = self.padded_volume_size();
 
+        [
+            padded_size[0] / partition_stride[0],
+            padded_size[1] / partition_stride[1],
+            padded_size[2] / partition_stride[2],
+        ]
+        
+        // [
+        //     ceiling_div(self.volume_size[0] - partition_subscr[0] * self.patch_stride[0], partition_stride[0]),
+        //     ceiling_div(self.volume_size[1] - partition_subscr[1] * self.patch_stride[1], partition_stride[1]),
+        //     ceiling_div(self.volume_size[2] - partition_subscr[2] * self.patch_stride[2], partition_stride[2]),
+        // ]
+    }
 
     fn global_patch_subscript_to_grid_subscript(&self,patch_subscr:[usize;3]) -> [usize;3] {
         [
@@ -114,6 +114,7 @@ impl PatchPlanner {
 
     /// indices must have the same length as the number of voxels in a patch
     fn grid_subscript_to_grid_indices(&self,grid_subscr:[usize;3],indices:&mut [usize]) {
+        println!("{:?}",grid_subscr);
         let padded_vol_size = self.padded_volume_size();
         let mut i = 0;
         for ix in grid_subscr[0]..(grid_subscr[0]+self.patch_size[0]) {
@@ -130,11 +131,10 @@ impl PatchPlanner {
     }
 
     fn padded_volume_size(&self) -> [usize;3] {
-        let n_patches = self.n_patches();
         [
-            (n_patches[0] - 1) * self.patch_stride[0] + self.patch_size[0],
-            (n_patches[1] - 1) * self.patch_stride[1] + self.patch_size[1],
-            (n_patches[2] - 1) * self.patch_stride[2] + self.patch_size[2],
+            ceiling_div(self.volume_size[0], self.patch_stride[0]) * self.patch_stride[0] + 1,
+            ceiling_div(self.volume_size[1], self.patch_stride[1]) * self.patch_stride[1] + 1,
+            ceiling_div(self.volume_size[2], self.patch_stride[2]) * self.patch_stride[2] + 1,
         ]
     }
 
@@ -142,21 +142,51 @@ impl PatchPlanner {
 }
 
 
+//cargo test --package kmppca --lib -- patch_planner::test --exact --nocapture
 #[test]
 fn test() {
 
+    let vol_size = [197,1,1];
+
     let p = PatchPlanner {
-        patch_size: [10,10,10],
-        patch_stride: [10,10,10],
-        volume_size: [197,120,120],
+        patch_size: [10,1,1],
+        patch_stride: [8,1,1],
+        volume_size: vol_size,
     };
 
     println!("{:?}",p.n_partitions());
-    println!("{:?}",p.n_patches());
-    println!("{:?}",p.padded_volume_size());
+    let padded_size = p.padded_volume_size();
+    println!("{:?}",padded_size);
 
+    let mut w = cfl::CflWriter::new("test_out", &padded_size).unwrap();
+
+    let src = vec![Complex32::ONE;p.patch_size()];
     let mut indices = vec![0usize;p.patch_size()];
-    p.vol_indices([0,0,0], [0,0,0], &mut indices);
-    println!("{:?}",indices);
+
+
+    
+    let part_size = p.partition_size([0,0,0]);
+    println!("partition size: {:?}",part_size);
+    // write a into buffer directly
+    let op = |_,a| a;
+
+    for i in 0..(part_size[0]) {
+        for j in 0..part_size[1] {
+            for k in 0..part_size[2] {
+                p.vol_indices([0,0,0], [i,j,k], &mut indices);
+                w.write_op_from(&indices, &src, op).unwrap();
+            }
+        }
+    }
+
+    //println!("{:?}",indices);
+
+
+    
+
+    
+
+
+
 
 }

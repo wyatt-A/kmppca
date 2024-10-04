@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 cfl = {git = "git+ssh://git@github.com:/wyatt-A/cfl.git", branch = "main" }
-#image_utils = {path = "../civm_scan/image_utils"}
-ndarray-linalg = {version = "0.15.0",features = ["netlib-system"]}
+#ndarray-linalg = {version = "0.15.0",features = ["netlib-system"]}
+ndarray-linalg = {version = "0.15.0",features = ["openblas-system"]}
 array_utils = {path = "../civm_scan/array_utils"}
 rand = "0.8.5"
 byte-order = "0.3.0"
