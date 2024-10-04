@@ -1,23 +1,26 @@
 pub mod patch_generator;
 use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek, Write}, mem::size_of, path::{Path, PathBuf}, sync::{Arc, Mutex}};
-use cfl::{ndarray::{parallel::prelude::IntoParallelIterator, Array2, Array3, Axis, ShapeBuilder}, num_complex::{Complex, Complex32}};
+use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, IntoParallelRefIterator}, Array2, Array3, ArrayD, Axis, ShapeBuilder}, num_complex::{Complex, Complex32, ComplexFloat}};
+use fourier::window_functions::WindowFunction;
 use indicatif::ProgressStyle;
 use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD};
 use patch_generator::{partition_patch_ids, PatchGenerator};
 use serde::{Deserialize, Serialize};
 use cfl::ndarray::parallel::prelude::ParallelIterator;
-pub mod slurm;
 
+use cfl::ndarray::parallel::prelude::*;
+
+pub mod slurm;
+mod patch_planner;
 
 #[cfg(test)]
 mod tests {
 
-    use std::{fs::File, io::{Read, Write}, path::Path, ptr::write_bytes, time::Instant};
+    use std::{fs::File, io::{Read, Write}, path::Path, time::Instant};
 
-    use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, ParallelIterator}, Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
-    use ndarray_linalg::{c32, SVD};
+    use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, ParallelIterator}, Array1, Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
+    use ndarray_linalg::SVD;
     use cfl::num_complex::Complex32;
-    use serde::Serialize;
     use crate::{ceiling_div, patch_generator::{partition_patch_ids, PatchGenerator}, phase_correct_volume, singular_value_threshold_mppca, Plan};
 
     #[test]
@@ -80,6 +83,8 @@ mod tests {
         for batch in 0..n_batches {
             println!("processing batch {} of {} ...",batch+1,n_batches);
             let mut patch_data = Array3::from_elem((patch_gen.patch_size(),data_set.len(),patch_batch_size).f(), Complex32::ZERO);
+            let mut noise_data = Array1::from_elem(patch_batch_size,0f32);
+
 
             //println!("reading patches ...");
             // iterate over the patch batch
@@ -95,7 +100,7 @@ mod tests {
 
             //println!("processing patches ...");
             //singular_value_threshold_mppca(&mut patch_data, None);
-            singular_value_threshold_mppca(&mut patch_data, Some(8));
+            singular_value_threshold_mppca(&mut patch_data, noise_data.as_slice_memory_order_mut().unwrap(), Some(8));
             //println!("writing patches ...");
 
             // integrate the values in the file
@@ -193,75 +198,6 @@ mod tests {
         f.write_all(&bytes).unwrap();
 
     }
-    
-    //cargo test --package kmppca --lib -- tests::test_launch --exact --nocapture
-    // #[test]
-    // fn test_launch() {
-
-    //     // we are given the computer index and batch from the array job
-    //     // and the
-    //     let computer_idx = 0;
-    //     let batch_index = 0;
-    //     let n_volumes = 67;
-    //     let batch_size = 2000;
-
-    //     let mut f = File::open("plan").unwrap();
-    //     let mut byte_buff = vec![];
-    //     f.read_to_end(&mut byte_buff).unwrap();
-    //     let plan: Plan = bincode::deserialize(&byte_buff).unwrap();
-
-    //     println!("plan len: {}",plan.plan_data.len());
-
-    //     let patches_to_process = &plan.plan_data[batch_index][computer_idx];
-    //     let n_patches_to_process = patches_to_process.len();
-
-    //     let n_batches = ceiling_div(n_patches_to_process, batch_size);
-
-    //     println!("n_batches = {}",n_batches);
-    //     println!("n total patches = {}",n_patches_to_process);
-        
-    //     let mut writers:Vec<_> = plan.output_volumes.iter().map(|path| CflWriter::open(path).unwrap()).collect();
-    //     let readers:Vec<_> = plan.input_volumes.iter().map(|path|{
-    //         println!("cfl base: {:?}",path);
-    //         CflReader::new(path).unwrap()
-    //     } ).collect();
-
-    //     for (batch_id,batch) in patches_to_process.chunks(batch_size).enumerate() {
-
-    //         println!("loading data for batch {} of {} ...",batch_id+1,n_batches);
-
-    //         let mut patch_data = Array3::from_elem((plan.patch_generator.patch_size(),n_volumes,batch.len()).f(), Complex32::ZERO);
-    //         patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
-    //             // get the patch index values, shared over all volumes in data set
-    //             let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
-    //             // iterate over each volume, assigning patch data to a single column
-    //             for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(readers.iter()) {
-    //                 // read_into uses memory mapping internally to help with random indexing of volume files
-    //                 vol.read_into(&patch_indices, col.as_slice_memory_order_mut().unwrap()).unwrap()
-    //             }
-    //         });
-
-    //         println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
-    //         singular_value_threshold_mppca(&mut patch_data, Some(1));
-
-    //         let write_operation = |a,b| a + b;
-
-    //         println!("writing data for batch {} of {} ...",batch_id+1,n_batches);
-    //         patch_data.axis_iter_mut(Axis(2)).enumerate().for_each(|(idx,mut patch)|{
-    //             // get the patch index values, shared over all volumes in data set
-    //             let patch_indices = plan.patch_generator.nth(batch[idx]).unwrap();
-    //             // iterate over each volume, assigning patch data to a single column
-    //             for (mut col,vol) in patch.axis_iter_mut(Axis(1)).zip(writers.iter_mut()) {
-    //                 // write_from uses memory mapping internally to help with random indexing of volume files
-    //                 vol.write_op_from(&patch_indices, col.as_slice_memory_order_mut().unwrap(),write_operation).unwrap()
-    //             }
-    //         });
-
-    //     }
-
-    // }
-
-
 
 }
 
@@ -330,6 +266,8 @@ pub struct Config {
     pub patch_plan_file:PathBuf,
     pub input_files:Vec<PathBuf>,
     pub output_files:Vec<PathBuf>,
+    pub noise_volume:PathBuf,
+    pub normalization_volume:PathBuf,
     pub batch_size:usize,
 }
 
@@ -351,12 +289,11 @@ impl Config {
 }
 
 
-pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Option<usize>) {
+pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, noise:&mut [f32], rank:Option<usize>) {
 
     let m = patch_data.shape()[0];
     let n = patch_data.shape()[1];
 
-    
     
     // let prog_bar = indicatif::ProgressBar::new(patch_data.shape()[2] as u64);
     // prog_bar.set_style(
@@ -368,7 +305,7 @@ pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Op
     let count = Arc::new(Mutex::new(0usize));
     
 
-    patch_data.axis_iter_mut(Axis(2)).into_par_iter().for_each(|mut matrix| {
+    patch_data.axis_iter_mut(Axis(2)).into_par_iter().zip(noise.par_iter_mut()).for_each(|(mut matrix,noise)| {
 
         let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
 
@@ -376,8 +313,9 @@ pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, rank:Op
         // let (_,sigma_sq) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
         // matrix.par_mapv_inplace(|x| x / sigma_sq);
         let (u,mut s,v) = matrix.svd(true, true).unwrap();
-        let (rank,_) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
+        let (rank,sigma_sq) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
 
+        *noise = sigma_sq;
         // let thresh = if let Some(rank) = rank {
         //     rank
         // }else {
@@ -413,10 +351,21 @@ pub fn ceiling_div(a:usize,b:usize) -> usize {
 
 fn phase_correct_volume<P:AsRef<Path>>(cfl_in:P, cfl_out:P, phase_op_out:P) {
     let x = cfl::to_array(cfl_in, true).unwrap();
-    let w = fft::window_functions::HanningWindow::new(x.shape());
-    let (pc,phase) = image_utils::unwrap_phase::phase_correct(&x,Some(&w));
+    let w = fourier::window_functions::HanningWindow::new(x.shape());
+    let (pc,phase) = phase_correct(&x,Some(&w));
     cfl::from_array(cfl_out, &pc).unwrap();
     cfl::from_array(phase_op_out, &phase).unwrap();
+}
+
+pub fn phase_correct<W:WindowFunction>(complex_img:&ArrayD<Complex32>, window_function:Option<&W>) -> (ArrayD<Complex32>,ArrayD<Complex32>) {
+    let mut tmp = complex_img.clone();
+    if let Some(w) = window_function {
+        fourier::rustfft::fftn(&mut tmp);
+        w.apply(&mut tmp);
+        fourier::rustfft::ifftn(&mut tmp);
+    }
+    let phase_correction = tmp.map(|x|x.unscale(x.abs()).conj());
+    (complex_img * &phase_correction, phase_correction)
 }
 
 /*
