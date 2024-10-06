@@ -1,4 +1,4 @@
-use std::{fmt::write, fs::File, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex}, time::Instant};
+use std::{fmt::write, fs::File, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, Mutex}, time::Instant};
 
 use bincode::de::read;
 use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Slice}, num_complex::ComplexFloat, CflReader, CflWriter};
@@ -184,13 +184,29 @@ struct Config {
     patch_planner:PatchPlanner,
     input_volumes:Vec<PathBuf>,
     n_processes:usize,
+    batch_size:usize,
 }
 
 impl Config {
-    pub fn to_file(filename:&str)
+    pub fn to_file(&self,filename:impl AsRef<Path>) {
+        let s = serde_json::to_string_pretty(&self)
+        .expect("failed to serialize");
+        let mut f = File::create(filename.as_ref().with_extension("json"))
+        .expect("failed to create file");
+        f.write_all(s.as_bytes()).expect("failed to write to file");
+    }
+
+    pub fn from_file(filename:impl AsRef<Path>) -> Self {
+        let mut f = File::open(filename.as_ref().with_extension("json"))
+        .expect("failed to open file");
+        let mut s = String::new();
+        f.read_to_string(&mut s).expect("failed to read file");
+        serde_json::from_str(&s).expect("failed to deserialize config")
+    }
+
 }
 
-fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize) {
+fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
 
     if !work_dir.as_ref().exists() {
         std::fs::create_dir_all(work_dir.as_ref())
@@ -219,17 +235,75 @@ fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,p
         patch_planner,
         input_volumes: input_files,
         n_processes,
+        batch_size
     };
 
-    let config_string = serde_json::to_string_pretty(&c).expect("failed to serialize config");
-    let mut f = File::create(work_dir.as_ref().join("config").with_extension("json")).expect("failed to write config");
-    f.write_all(config_string.as_bytes()).expect("failed to write to config file");
+    c.to_file(work_dir.as_ref().join("config"));
 
 }
 
-fn mppca_launch(work_dir:impl AsRef<Path>,process_idx:usize) {
+fn mppca_launch(work_dir:impl AsRef<Path>,partition_idx:usize,process_idx:usize) {
 
-    let config = work_dir.as_ref().join("config").with_extension("toml");
+
+    let c = Config::from_file(work_dir.as_ref().with_file_name("config"));
+
+
+    let n = c.patch_planner.n_total_partition_patches_lin(partition_idx);
+
+    let patch_ids:Vec<_> = (0..n).collect();
+    let patch_ids = patch_ids.chunks(c.n_processes).nth(process_idx).unwrap();
+
+    let reader = CflReader::new("padded").unwrap();
+    let mut writer = CflWriter::open("denoised").unwrap();
+    
+    let mut noise_writer = CflWriter::new("noise",&c.patch_planner.padded_array_size()).unwrap();
+    let mut norm = CflWriter::new("norm",&c.patch_planner.padded_array_size()).unwrap();
+
+    let patch_size = c.patch_planner.patch_size();
+    let n_volumes = c.input_volumes.len();
+    let padded_volume_stride:usize = c.patch_planner.padded_array_size().iter().product();
+
+    let mut patch_indixes = vec![0usize;patch_size];
+
+
+    let accum = |a,b| a + b;
+
+
+    for (_,batch) in patch_ids.chunks(c.batch_size).enumerate() {
+
+        let mut patch_data = Array3::<Complex32>::zeros((patch_size,n_volumes,batch.len()).f());
+        let mut noise_data = Array1::from_elem(batch.len().f(),0f32);
+        let mut patch_noise_tmp = Array1::<Complex32>::zeros(patch_size.f());
+        let ones = Array1::<Complex32>::ones(patch_size.f());
+
+        patch_data.axis_iter_mut(Axis(2)).zip(batch).for_each(|(mut patch,&patch_idx)|{
+            // get the patch index values, shared over all volumes in data set
+            c.patch_planner.linear_indices(partition_idx, patch_idx, &mut patch_indixes);
+
+            for mut col in patch.axis_iter_mut(Axis(1)) {                    
+                reader.read_into(&patch_indixes, col.as_slice_memory_order_mut().unwrap()).unwrap();
+                patch_indixes.par_iter_mut().for_each(|idx| *idx += padded_volume_stride);
+            }
+
+        });
+
+        //println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
+        singular_value_threshold_mppca(&mut patch_data, noise_data.as_slice_memory_order_mut().unwrap(), None);
+        
+        patch_data.axis_iter(Axis(2)).zip(batch).zip(noise_data.iter()).for_each(|((patch,&patch_idx),&patch_noise)|{
+            // get the patch index values, shared over all volumes in data set
+            c.patch_planner.linear_indices(partition_idx, patch_idx, &mut patch_indixes);
+
+            patch_noise_tmp.fill(Complex32::new(patch_noise,0.));
+            noise_writer.write_op_from(&patch_indixes, patch_noise_tmp.as_slice_memory_order().unwrap(), accum).unwrap();
+            norm.write_op_from(&patch_indixes, ones.as_slice_memory_order().unwrap(), accum).unwrap();
+
+            for col in patch.axis_iter(Axis(1)) {
+                writer.write_op_from(&patch_indixes, col.as_slice_memory_order().unwrap(), accum).unwrap();
+                patch_indixes.par_iter_mut().for_each(|idx| *idx += padded_volume_stride);
+            }
+        });
+    }
 
 
 
