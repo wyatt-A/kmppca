@@ -1,11 +1,12 @@
-use std::{fmt::write, path::Path, sync::{Arc, Mutex}, time::Instant};
+use std::{fmt::write, fs::File, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex}, time::Instant};
 
 use bincode::de::read;
-use cfl::{ndarray::{parallel::prelude::{IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Slice}, num_complex::ComplexFloat, CflReader, CflWriter};
+use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Slice}, num_complex::ComplexFloat, CflReader, CflWriter};
 use fourier::window_functions::WindowFunction;
 use kmppca::{ceiling_div, patch_planner::PatchPlanner, singular_value_threshold_mppca};
 use ndarray_linalg;
 use cfl::num_complex::Complex32;
+use serde::{Deserialize, Serialize};
 
 
 fn main() {
@@ -176,4 +177,61 @@ fn main() {
             });
         }
     }
+}
+
+#[derive(Serialize,Deserialize)]
+struct Config {
+    patch_planner:PatchPlanner,
+    input_volumes:Vec<PathBuf>,
+    n_processes:usize,
+}
+
+impl Config {
+    pub fn to_file(filename:&str)
+}
+
+fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize) {
+
+    if !work_dir.as_ref().exists() {
+        std::fs::create_dir_all(work_dir.as_ref())
+        .expect("failed to create work dir");
+    }
+
+    let mut dims = vec![];
+    println!("checking input files ...");
+    let input_files:Vec<_> = (0..n_volumes).map(|i|{
+        let filename = PathBuf::from(input_cfl_pattern.replace("*", &format!("{:01}",i)));
+        let d = cfl::get_dims(&filename).expect("failed to load cfl header");
+        if dims.is_empty() {
+            dims = d;
+        }else {
+            assert_eq!(dims.as_slice(),d.as_slice(),"detected inconsistent cfl dims");
+        }
+        filename
+    }).collect();
+
+    let mut volume_size = [0usize;3];
+    volume_size.iter_mut().zip(dims).for_each(|(vs,d)|*vs = d);
+
+    let patch_planner = PatchPlanner::new(volume_size,patch_size,patch_stride);
+
+    let c = Config {
+        patch_planner,
+        input_volumes: input_files,
+        n_processes,
+    };
+
+    let config_string = serde_json::to_string_pretty(&c).expect("failed to serialize config");
+    let mut f = File::create(work_dir.as_ref().join("config").with_extension("json")).expect("failed to write config");
+    f.write_all(config_string.as_bytes()).expect("failed to write to config file");
+
+}
+
+fn mppca_launch(work_dir:impl AsRef<Path>,process_idx:usize) {
+
+    let config = work_dir.as_ref().join("config").with_extension("toml");
+
+
+
+
 }

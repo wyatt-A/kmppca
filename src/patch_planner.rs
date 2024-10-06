@@ -1,8 +1,10 @@
 use std::{ops::Range, time::Instant};
 use cfl::num_complex::Complex32;
+use serde::{Deserialize, Serialize};
 
 use crate::ceiling_div;
 
+#[derive(Serialize,Deserialize)]
 pub struct PatchPlanner {
     x:Patch1D,
     y:Patch1D,
@@ -140,7 +142,7 @@ fn test() {
 
 }
 
-
+#[derive(Serialize,Deserialize)]
 struct Patch1D {
     array_size:usize,
     patch_size:usize,
