@@ -95,12 +95,4 @@ fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str,config:impl AsRef<P
 
     }
 
-
-
-
-
-    
-    
-
-
 }

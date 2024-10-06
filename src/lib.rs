@@ -7,11 +7,10 @@ use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD};
 use patch_generator::{partition_patch_ids, PatchGenerator};
 use serde::{Deserialize, Serialize};
 use cfl::ndarray::parallel::prelude::ParallelIterator;
-
+pub mod patch_planner;
 use cfl::ndarray::parallel::prelude::*;
 
 pub mod slurm;
-mod patch_planner;
 
 #[cfg(test)]
 mod tests {
@@ -21,7 +20,7 @@ mod tests {
     use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, ParallelIterator}, Array1, Array3, Axis, Ix3, ShapeBuilder}, CflReader, CflWriter};
     use ndarray_linalg::SVD;
     use cfl::num_complex::Complex32;
-    use crate::{ceiling_div, patch_generator::{partition_patch_ids, PatchGenerator}, phase_correct_volume, singular_value_threshold_mppca, Plan};
+    use crate::{ceiling_div, patch_generator::{partition_patch_ids, PatchGenerator}, singular_value_threshold_mppca, Plan};
 
     #[test]
     fn test_svd_decomp_recon() {
@@ -302,10 +301,11 @@ pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, noise:&
     //         .progress_chars("=>-")
     // );
 
-    let count = Arc::new(Mutex::new(0usize));
+    //let count = Arc::new(Mutex::new(0usize));
     
 
     patch_data.axis_iter_mut(Axis(2)).into_par_iter().zip(noise.par_iter_mut()).for_each(|(mut matrix,noise)| {
+    //patch_data.axis_iter_mut(Axis(2)).zip(noise.iter_mut()).for_each(|(mut matrix,noise)| {
 
         let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
 
@@ -337,9 +337,9 @@ pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, noise:&
         let denoised_matrix = u.dot(&_s).dot(&v);
         //denoised_matrix.par_mapv_inplace(|x| x * sigma_sq);
         matrix.assign(&denoised_matrix);
-        let mut g = count.lock().unwrap();  
-        *g += 1;
-        println!("{}",g);
+        //let mut g = count.lock().unwrap();  
+        //*g += 1;
+        //println!("{}",g);
         //prog_bar.inc(1);
     });
     //prog_bar.finish();
@@ -349,13 +349,13 @@ pub fn ceiling_div(a:usize,b:usize) -> usize {
     (a + b - 1) / b
 }
 
-fn phase_correct_volume<P:AsRef<Path>>(cfl_in:P, cfl_out:P, phase_op_out:P) {
-    let x = cfl::to_array(cfl_in, true).unwrap();
-    let w = fourier::window_functions::HanningWindow::new(x.shape());
-    let (pc,phase) = phase_correct(&x,Some(&w));
-    cfl::from_array(cfl_out, &pc).unwrap();
-    cfl::from_array(phase_op_out, &phase).unwrap();
-}
+// fn phase_correct_volume<P:AsRef<Path>>(cfl_in:P, cfl_out:P, phase_op_out:P) {
+//     let x = cfl::to_array(cfl_in, true).unwrap();
+//     let w = fourier::window_functions::HanningWindow::new(x.shape());
+//     let (pc,phase) = phase_correct(&x,Some(&w));
+//     cfl::from_array(cfl_out, &pc).unwrap();
+//     cfl::from_array(phase_op_out, &phase).unwrap();
+// }
 
 pub fn phase_correct<W:WindowFunction>(complex_img:&ArrayD<Complex32>, window_function:Option<&W>) -> (ArrayD<Complex32>,ArrayD<Complex32>) {
     let mut tmp = complex_img.clone();
@@ -414,6 +414,9 @@ fn marchenko_pastur_singular_value(singular_values:&[f32],m:usize,n:usize) -> (u
     let range_mp:Vec<_> = (0..r).map(|x| x as f32).map(|x| (m as f32 - x) /  n as f32).map(|x| x.sqrt() * 4.).collect();
     let range_data:Vec<_> = vals[0..r].iter().map(|x| x - vals[r-1]).collect();
     let sigmasq_2:Vec<_> = range_data.into_iter().zip(range_mp).map(|(x,y)|x / y).collect();
+
+    //println!("{:?}",sigmasq_1);
+    //println!("{:?}",sigmasq_2);
 
     let idx = sigmasq_1.iter().zip(sigmasq_2).enumerate().find_map(|(i,(s1,s2))|{
         if s2 < *s1 {
