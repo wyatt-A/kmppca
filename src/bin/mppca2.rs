@@ -21,6 +21,7 @@ enum SubCmd {
     Plan(PlanArgs),
     Init(InitArgs),
     Denoise(DenoiseArgs),
+    DenoisePartition(DenoisePartitionArgs)
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -44,6 +45,13 @@ struct InitArgs {
 #[derive(Parser, Debug, Clone)]
 struct DenoiseArgs {
     work_dir:PathBuf,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct DenoisePartitionArgs {
+    work_dir:PathBuf,
+    partition_id:usize,
+    process_id:usize,
 }
 
 
@@ -100,6 +108,13 @@ fn main() {
                 }
             }
         },
+        SubCmd::DenoisePartition(denoise_partition_args) => {
+            mppca_denoise(
+                denoise_partition_args.work_dir,
+                denoise_partition_args.process_id,
+                denoise_partition_args.partition_id
+            );
+        },
     }
 }
 
@@ -116,7 +131,7 @@ fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str) {
     let this_exe = std::env::current_exe().expect("failed to get this exe");
 
     let mut cmd = Command::new(&this_exe);
-    cmd.arg("denoise");
+    cmd.arg("denoise-partition");
     cmd.arg(work_dir.as_ref());
     cmd.arg("$SLURM_ARRAY_TASK_ID");
     cmd.arg(0.to_string());
@@ -134,7 +149,7 @@ fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str) {
         n_processes = patch_ids.len();
 
         let mut cmd = Command::new(&this_exe);
-        cmd.arg("denoise");
+        cmd.arg("denoise-partition");
         cmd.arg(work_dir.as_ref());
         cmd.arg("$SLURM_ARRAY_TASK_ID");
         cmd.arg(0.to_string());
@@ -361,7 +376,7 @@ fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,p
     let mut dims = vec![];
     println!("checking input files ...");
     let input_files:Vec<_> = (0..n_volumes).map(|i|{
-        let filename = PathBuf::from(input_cfl_pattern.replace("*", &format!("{:02}",i)));
+        let filename = PathBuf::from(input_cfl_pattern.replace("*", &format!("{:01}",i)));
         let d = cfl::get_dims(&filename).expect("failed to load cfl header");
         if dims.is_empty() {
             dims = d;
