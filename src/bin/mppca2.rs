@@ -1,7 +1,7 @@
 use std::{fmt::write, fs::File, io::{Read, Write}, os::unix::process, path::{Path, PathBuf}, process::Command, sync::{Arc, Mutex}, time::Instant};
 
 use bincode::de::read;
-use cfl::{ndarray::{parallel::prelude::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Slice}, num_complex::ComplexFloat, CflReader, CflWriter};
+use cfl::{ndarray::{parallel::prelude::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Slice, Zip}, num_complex::ComplexFloat, CflReader, CflWriter};
 use fourier::window_functions::WindowFunction;
 use kmppca::{ceiling_div, patch_planner::PatchPlanner, singular_value_threshold_mppca, slurm::{self, SlurmTask}};
 use ndarray_linalg;
@@ -21,7 +21,13 @@ enum SubCmd {
     Plan(PlanArgs),
     Init(InitArgs),
     Denoise(DenoiseArgs),
-    DenoisePartition(DenoisePartitionArgs)
+    DenoisePartition(DenoisePartitionArgs),
+    AllocateOutput(AllocateOutputArgs)
+}
+
+#[derive(Parser, Debug, Clone)]
+struct AllocateOutputArgs {
+    work_dir:PathBuf,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -50,8 +56,8 @@ struct DenoiseArgs {
 #[derive(Parser, Debug, Clone)]
 struct DenoisePartitionArgs {
     work_dir:PathBuf,
-    partition_id:usize,
     process_id:usize,
+    partition_id:usize,
 }
 
 
@@ -86,17 +92,10 @@ fn main() {
 
             let c = Config::from_file(denoise_args.work_dir.join("config"));
 
-            let denoise_out = denoise_args.work_dir.join("denoised");
-            let noise_out = denoise_args.work_dir.join("noise");
-            let norm_out = denoise_args.work_dir.join("norm");
-
-            let _ = CflWriter::new(denoise_out,&c.padded_stack_size).unwrap();
-    
-            let _ = CflWriter::new(noise_out,&c.patch_planner.padded_array_size()).unwrap();
-            let _ = CflWriter::new(norm_out,&c.patch_planner.padded_array_size()).unwrap();
+            mppca_allocate_output(&denoise_args.work_dir);
 
             if slurm::is_installed() {
-                launch_array_jobs(&denoise_args.work_dir,"denoise_test")
+                launch_array_jobs(&denoise_args.work_dir,"denoise_test",2_000); // 2 gigs of memory per process
             }else {
                 let n_partitions = c.patch_planner.n_total_partitions();
                 println!("n partitions: {}",n_partitions);
@@ -115,10 +114,13 @@ fn main() {
                 denoise_partition_args.partition_id
             );
         },
+        SubCmd::AllocateOutput(allocate_output_args) => {
+            mppca_allocate_output(allocate_output_args.work_dir)
+        },
     }
 }
 
-fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str) {
+fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str,req_mem_mb:usize) {
 
     let c = Config::from_file(work_dir.as_ref().join("config"));
 
@@ -136,7 +138,7 @@ fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str) {
     cmd.arg("$SLURM_ARRAY_TASK_ID");
     cmd.arg(0.to_string());
 
-    let mut task = SlurmTask::new(work_dir.as_ref(),job_name,1_000)
+    let mut task = SlurmTask::new(work_dir.as_ref(),&format!("{}_partition_{}",job_name,0),req_mem_mb)
     .output(work_dir.as_ref())
     .array(0, n_processes-1)
     .command(cmd);
@@ -152,9 +154,9 @@ fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str) {
         cmd.arg("denoise-partition");
         cmd.arg(work_dir.as_ref());
         cmd.arg("$SLURM_ARRAY_TASK_ID");
-        cmd.arg(0.to_string());
+        cmd.arg(partition.to_string());
     
-        let mut task = SlurmTask::new(work_dir.as_ref(),job_name,1_000)
+        let mut task = SlurmTask::new(work_dir.as_ref(),&format!("{}_partition_{}",job_name,partition),req_mem_mb)
         .output(work_dir.as_ref())
         .array(0, n_processes-1)
         .job_dependency_after_ok(jid)
@@ -165,176 +167,6 @@ fn launch_array_jobs(work_dir:impl AsRef<Path>,job_name:&str) {
     }
 
 }
-
-// fn main() {
-
-//     // 4-D data set of complex images over q-space
-//     // do phase-corrections
-
-//     let inputs = "/home/wyatt/test_data/raw";
-//     let n_volumes = 67;
-
-//     let dims = [197,120,120,n_volumes];
-
-//     println!("allocating 4-D stack...");
-//     let mut writer = cfl::CflWriter::new("test4d",&dims).unwrap();
-
-//     let volume_stride:usize = dims[0..3].iter().product();
-    
-//     for i in 0..n_volumes {
-//         let cfl_in = Path::new(inputs).join(format!("i{:02}",i));
-//         let volume_data = cfl::to_array(cfl_in, true).expect("failed to read cfl volume");
-//         let volume_data_slice = volume_data.as_slice_memory_order()
-//         .expect("cfl volume is not in memory order");
-//         let starting_addr = i*volume_stride;
-//         println!("writing volume {} of {}",i+1,n_volumes);
-//         writer.write_slice(starting_addr,volume_data_slice).expect("failed to write volume into 4-D stack");
-//     }
-    
-
-
-//     // do phase corrections
-
-//     let reader = cfl::CflReader::new("test4d").expect("failed to create 4-D cfl reader");
-
-//     let mut tmp_vol = ArrayD::<Complex32>::zeros(dims[0..3].f());
-//     let mut pc_tmp = ArrayD::<Complex32>::zeros(dims[0..3].f());
-
-//     // define window function for phase corrections
-//     let w = fourier::window_functions::HanningWindow::new(&dims[0..3]);
-
-//     for i in 0..n_volumes {
-
-//         println!("filtering volume {} of {}",i+1,n_volumes);
-//         let starting_addr = i*volume_stride;
-
-//         // read volume data
-//         let volume_data = tmp_vol.as_slice_memory_order_mut().expect("failed to get memory order slice");
-//         reader.read_slice(starting_addr, volume_data).expect("failed to read from 4-D");
-
-//         // phase correct volume
-//         pc_tmp.assign(&tmp_vol);
-//         fourier::fftw::fftn_mut(&mut tmp_vol);
-//         w.apply(&mut tmp_vol);
-//         fourier::fftw::ifftn_mut(&mut tmp_vol);
-//         tmp_vol.par_mapv_inplace(|x| (x / x.abs()).conj() );
-//         pc_tmp *= &tmp_vol;
-
-//         // write volume to 4-D
-//         let volume_data = pc_tmp.as_slice_memory_order_mut().expect("failed to get memory order slice");
-//         writer.write_slice(starting_addr, volume_data).expect("failed to write to 4-D stack");
-
-//     }
-
-//     let vol_size = [dims[0],dims[1],dims[2]];
-//     let patch_planner = PatchPlanner::new(vol_size,[10,10,10],[10,10,10]);
-//     let padded_size = patch_planner.padded_array_size();
-//     let pad_amount = [padded_size[0] - vol_size[0],padded_size[1] - vol_size[1],padded_size[2] - vol_size[2]];
-
-//     println!("pad amount: {:?}",pad_amount);
-//     // do padding
-
-//     let writer = Arc::new(Mutex::new(
-//         CflWriter::new("padded",&[padded_size[0],padded_size[1],padded_size[2],n_volumes]).unwrap()
-//     ));
-
-//     let reader = CflReader::new("test4d").unwrap();
-
-//     let padded_volume_stride = padded_size.iter().product::<usize>();
-
-//     let mut non_padded_tmp = Array3::<Complex32>::zeros(vol_size.f());
-//     let mut padded_tmp = Array3::<Complex32>::zeros(padded_size.f());
-
-//     for vol in 0..n_volumes {
-
-//         println!("padding vol {} of {}",vol+1,n_volumes);
-//         // calculate offset addresses
-//         let starting_addr_non_padded = vol*volume_stride;
-//         let starting_addr_padded = vol*padded_volume_stride;
-
-//         reader.read_slice(starting_addr_non_padded, non_padded_tmp.as_slice_memory_order_mut().unwrap()).unwrap();
-
-//         // assign the non-padded volume to padded volume
-//         padded_tmp.slice_mut(s![0..vol_size[0],0..vol_size[1],0..vol_size[2]])
-//         .assign(&non_padded_tmp);
-
-//         for ax in 0..3 {
-//             if pad_amount[ax] > 0 {
-//                 padded_tmp.slice_axis_mut(Axis(ax), Slice::from(vol_size[ax]..))
-//                 .assign(
-//                     &non_padded_tmp.slice_axis(Axis(ax), Slice::from(0..pad_amount[ax]))
-//                 );
-//             }
-//         }
-
-//         writer.lock().unwrap().write_slice(starting_addr_padded, padded_tmp.as_slice_memory_order().unwrap()).unwrap();
-//     }
-
-
-//     // do mppca denoising
-
-//     let reader = CflReader::new("padded").unwrap();
-//     let mut writer = CflWriter::new("output",&[padded_size[0],padded_size[1],padded_size[2],n_volumes]).unwrap();
-    
-//     let mut noise_writer = CflWriter::new("noise",&[padded_size[0],padded_size[1],padded_size[2]]).unwrap();
-//     let mut norm = CflWriter::new("norm",&[padded_size[0],padded_size[1],padded_size[2]]).unwrap();
-
-//     let batch_size = 1000;
-
-//     let mut patch_indixes = vec![0usize;patch_planner.patch_size()];
-
-
-//     let accum = |a,b| a + b;
-//     //let noise_write_op = |_,b| b;
-
-
-//     let n_partitions = patch_planner.n_total_partitions();
-//     for partition in 0..n_partitions {
-//         println!("working on partition {} of {}..",partition+1,n_partitions);
-
-//         let n_patches = patch_planner.n_total_partition_patches_lin(partition);
-
-//         let patch_ids:Vec<_> = (0..n_patches).collect();
-
-//         let n_batches = ceiling_div(n_patches, batch_size);
-
-//         for (batch_id,batch) in patch_ids.chunks(batch_size).enumerate() {
-
-//             let mut patch_data = Array3::<Complex32>::zeros((patch_planner.patch_size(),n_volumes,batch.len()).f());
-//             let mut noise_data = Array1::from_elem(batch.len().f(),0f32);
-//             let mut patch_noise_tmp = Array1::<Complex32>::zeros(patch_planner.patch_size().f());
-//             let ones = Array1::<Complex32>::ones(patch_planner.patch_size().f());
-
-//             patch_data.axis_iter_mut(Axis(2)).zip(batch).for_each(|(mut patch,&patch_idx)|{
-//                 // get the patch index values, shared over all volumes in data set
-//                 patch_planner.linear_indices(partition, patch_idx, &mut patch_indixes);
-
-//                 for mut col in patch.axis_iter_mut(Axis(1)) {                    
-//                     reader.read_into(&patch_indixes, col.as_slice_memory_order_mut().unwrap()).unwrap();
-//                     patch_indixes.par_iter_mut().for_each(|idx| *idx += padded_volume_stride);
-//                 }
-
-//             });
-
-//             println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
-//             singular_value_threshold_mppca(&mut patch_data, noise_data.as_slice_memory_order_mut().unwrap(), None);
-            
-//             patch_data.axis_iter(Axis(2)).zip(batch).zip(noise_data.iter()).for_each(|((patch,&patch_idx),&patch_noise)|{
-//                 // get the patch index values, shared over all volumes in data set
-//                 patch_planner.linear_indices(partition, patch_idx, &mut patch_indixes);
-
-//                 patch_noise_tmp.fill(Complex32::new(patch_noise,0.));
-//                 noise_writer.write_op_from(&patch_indixes, patch_noise_tmp.as_slice_memory_order().unwrap(), accum).unwrap();
-//                 norm.write_op_from(&patch_indixes, ones.as_slice_memory_order().unwrap(), accum).unwrap();
-
-//                 for col in patch.axis_iter(Axis(1)) {
-//                     writer.write_op_from(&patch_indixes, col.as_slice_memory_order().unwrap(), accum).unwrap();
-//                     patch_indixes.par_iter_mut().for_each(|idx| *idx += padded_volume_stride);
-//                 }
-//             });
-//         }
-//     }
-// }
 
 #[derive(Serialize,Deserialize)]
 struct Config {
@@ -364,6 +196,16 @@ impl Config {
         serde_json::from_str(&s).expect("failed to deserialize config")
     }
 
+}
+
+fn mppca_allocate_output(work_dir:impl AsRef<Path>) {
+    let c = Config::from_file(work_dir.as_ref().join("config"));
+    let denoise_out = work_dir.as_ref().join("denoised");
+    let noise_out = work_dir.as_ref().join("noise");
+    let norm_out = work_dir.as_ref().join("norm");
+    let _ = CflWriter::new(denoise_out,&c.padded_stack_size).unwrap();
+    let _ = CflWriter::new(noise_out,&c.patch_planner.padded_array_size()).unwrap();
+    let _ = CflWriter::new(norm_out,&c.patch_planner.padded_array_size()).unwrap();
 }
 
 fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
@@ -461,13 +303,13 @@ fn mppca_phase_correct(work_dir:impl AsRef<Path>) {
     let mut pc_tmp = ArrayD::<Complex32>::zeros(c.volume_size.as_slice().f());
 
     // define window function for phase corrections
-    let w = fourier::window_functions::HanningWindow::new(c.volume_size.as_slice());
+    let w = fourier::window_functions::HanningWindow::new(c.volume_size.as_slice()).window(c.volume_size.as_slice());
 
     let volume_stride:usize = c.volume_size.iter().product();
 
     for i in 0..c.stack_size[3] {
 
-        println!("filtering volume {} of {}",i+1,c.stack_size[3]);
+        println!("phase correcting volume {} of {}",i+1,c.stack_size[3]);
         let starting_addr = i*volume_stride;
 
         // read volume data
@@ -477,7 +319,10 @@ fn mppca_phase_correct(work_dir:impl AsRef<Path>) {
         // phase correct volume
         pc_tmp.assign(&tmp_vol);
         fourier::fftw::fftn_mut(&mut tmp_vol);
-        w.apply(&mut tmp_vol);
+        // apply window function
+        Zip::from(&mut tmp_vol).and(&w).par_for_each(|x,&w|{
+            *x = w * *x;
+        });
         fourier::fftw::ifftn_mut(&mut tmp_vol);
         tmp_vol.par_mapv_inplace(|x| (x / x.abs()).conj() );
         pc_tmp *= &tmp_vol;
@@ -515,8 +360,8 @@ fn mppca_pad(work_dir:impl AsRef<Path>) {
     let padded_volume_stride = padded_size.iter().product::<usize>();
     let volume_stride = c.volume_size.iter().product::<usize>();
 
-    let mut non_padded_tmp = Array3::<Complex32>::zeros(c.volume_size.f());
-    let mut padded_tmp = Array3::<Complex32>::zeros(padded_size.f());
+    //let mut non_padded_tmp = Array3::<Complex32>::zeros(c.volume_size.f());
+    //let mut padded_tmp = Array3::<Complex32>::zeros(padded_size.f());
 
     for vol in 0..c.stack_size[3] {
 
@@ -525,29 +370,48 @@ fn mppca_pad(work_dir:impl AsRef<Path>) {
         let starting_addr_non_padded = vol*volume_stride;
         let starting_addr_padded = vol*padded_volume_stride;
 
+        let mut non_padded_tmp = Array3::<Complex32>::zeros(c.volume_size.f());
         reader.read_slice(starting_addr_non_padded, non_padded_tmp.as_slice_memory_order_mut().unwrap()).unwrap();
-
-        // assign the non-padded volume to padded volume
+    
+        // Initialize padded array with full padded dimensions
+        let mut padded_tmp = Array3::<Complex32>::zeros(padded_size.f());
+        
         padded_tmp.slice_mut(s![0..c.volume_size[0],0..c.volume_size[1],0..c.volume_size[2]])
-        .assign(&non_padded_tmp);
+        .assign(
+            &non_padded_tmp
+        );
 
-        for ax in 0..3 {
-            if pad_amount[ax] > 0 {
-                padded_tmp.slice_axis_mut(Axis(ax), Slice::from(c.volume_size[ax]..))
-                .assign(
-                    &non_padded_tmp.slice_axis(Axis(ax), Slice::from(0..pad_amount[ax]))
-                );
-            }
+        non_padded_tmp = padded_tmp.clone();
+
+        if pad_amount[0] > 0 {
+            padded_tmp.slice_mut(s![c.volume_size[0]..,..,..])
+            .assign(
+                &non_padded_tmp.slice(s![0..pad_amount[0],..,..])
+            );
+            non_padded_tmp = padded_tmp.clone();
         }
+
+        if pad_amount[1] > 0 {
+            padded_tmp.slice_mut(s![..,c.volume_size[1]..,..])
+            .assign(
+                &non_padded_tmp.slice(s![..,0..pad_amount[1],..])
+            );
+            non_padded_tmp = padded_tmp.clone();
+        }
+
+        if pad_amount[2] > 0 {
+            padded_tmp.slice_mut(s![..,..,c.volume_size[2]..])
+            .assign(
+                &non_padded_tmp.slice(s![..,..,0..pad_amount[2]])
+            );
+        }
+
         writer.write_slice(starting_addr_padded, padded_tmp.as_slice_memory_order().unwrap()).unwrap();
     }
 }
 
 
-
-
 fn mppca_denoise(work_dir:impl AsRef<Path>,process_idx:usize,partition_idx:usize) {
-
 
     let c = Config::from_file(work_dir.as_ref().join("config"));
 
@@ -573,7 +437,6 @@ fn mppca_denoise(work_dir:impl AsRef<Path>,process_idx:usize,partition_idx:usize
     let padded_volume_stride:usize = c.patch_planner.padded_array_size().iter().product();
 
     let mut patch_indixes = vec![0usize;patch_size];
-
 
     let accum = |a,b| a + b;
 
@@ -616,7 +479,32 @@ fn mppca_denoise(work_dir:impl AsRef<Path>,process_idx:usize,partition_idx:usize
         });
     }
 
+}
 
 
+fn mppca_split_4d(work_dir:impl AsRef<Path>) {
+
+    let c = Config::from_file(work_dir.as_ref().join("config"));
+
+    let denoised_reader = CflReader::new(work_dir.as_ref().join("denoised")).unwrap();
+
+    let norm = cfl::to_array(work_dir.as_ref().join("norm"), true).unwrap();
+
+    let padded_volume_stride = c.patch_planner.padded_array_size().iter().product::<usize>();
+
+    let mut padded_temp = Array3::from_elem(c.patch_planner.padded_array_size().f(), Complex32::ZERO);
+    let mut unpadded_temp = ArrayD::from_elem(c.volume_size.as_slice().f(), Complex32::ZERO);
+
+    for vol in 0..c.stack_size[3] {
+        let address = vol * padded_volume_stride;
+        denoised_reader.read_slice(address, padded_temp.as_slice_memory_order_mut().unwrap()).unwrap();
+        // normalize denoised volume by norm volume
+        padded_temp /= &norm;
+        unpadded_temp.assign(
+            &padded_temp.slice(s![0..c.volume_size[0],0..c.volume_size[1],0..c.volume_size[2]])
+        );
+        let out = work_dir.as_ref().join(format!("d{:02}",vol));
+        cfl::from_array(out, &unpadded_temp).unwrap();
+    }
 
 }
