@@ -13,17 +13,6 @@ pub struct PatchPlanner {
 
 impl PatchPlanner {
 
-    pub fn partition_patch_ids(&self,n_processes:usize,partition_idx:usize) -> Vec<Vec<usize>> {
-        let n = self.n_total_partition_patches_lin(partition_idx);
-        let patch_ids:Vec<_> = (0..n).collect();
-        let chunk_size = n / n_processes;
-        patch_ids.chunks(chunk_size).map(|x|x.to_vec()).collect()
-    }
-
-    pub fn process_patch_ids(&self,n_processes:usize,process_idx:usize,partition_idx:usize) -> Vec<usize> {
-        self.partition_patch_ids(n_processes, partition_idx)[process_idx].to_owned()
-    }
-
     pub fn new(array_size:[usize;3],patch_size:[usize;3],patch_stride:[usize;3]) -> Self {
         Self {
             x: Patch1D::new(array_size[0],patch_size[0],patch_stride[0]),

@@ -187,7 +187,9 @@ pub enum SBatchOption {
     /// some dependency on another job
     Dependency(DependencyType),
     /// array job with a range of task ids
-    Array{start_id:usize,end_id:usize}
+    Array{start_id:usize,end_id:usize},
+    /// run on a specific node
+    Node{node_name:String}
 }
 
 #[derive(Clone)]
@@ -234,6 +236,9 @@ impl SBatchOption {
             SBatchOption::Array{start_id,end_id} => {
                 format!("#SBATCH --array={}-{}\n#SBATCH --ntasks=1",start_id,end_id)
             },
+            SBatchOption::Node { node_name } => {
+                format!("#SBATCH --nodelist={}",node_name)
+            },
         }
     }
     // unique identifier used in a hashmap to overwrite options
@@ -249,6 +254,7 @@ impl SBatchOption {
             SBatchOption::Email(_, _) => 7,
             SBatchOption::Dependency(_) => 8,
             SBatchOption::Array { .. } => 9,
+            SBatchOption::Node { .. } => 10,
         }
     }
 }
@@ -346,6 +352,11 @@ impl SlurmTask {
     /// specify a start delay for the sbatch task in seconds
     pub fn begin_delay_sec(self, delay_sec: usize) -> Self {
         self.add_opt(SBatchOption::BeginDelaySec(delay_sec))
+    }
+
+    /// specify a node name to run on
+    pub fn on_node(self,node_name:&str) -> Self {
+        self.add_opt(SBatchOption::Node { node_name: node_name.to_string() })
     }
 
     /// specify output directory for the slurm output file
