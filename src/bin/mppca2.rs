@@ -590,39 +590,41 @@ fn mppca_denoise(config_file:impl AsRef<Path>,process_idx:usize,partition_idx:us
         // });
     }
 
+    denoised_patch_file.flush().expect("failed to flush writer");
+    noise_file.flush().expect("failed to flush writer");
 }
 
 fn mppca_reconstruct(config:impl AsRef<Path>,partition_idx:usize) {
     let c = Config::from_file(config);
 
-    let denoise_file = c.result_filename(ResultFile::Denoised);
-    let noise_file = c.result_filename(ResultFile::Noise);
-    let norm_file = c.result_filename(ResultFile::Norm);
+    // let denoise_file = c.result_filename(ResultFile::Denoised);
+    // let noise_file = c.result_filename(ResultFile::Noise);
+    // let norm_file = c.result_filename(ResultFile::Norm);
 
-    std::fs::rename(&denoise_file.with_extension("hdr"), &denoise_file.with_file_name("denoised_r").with_extension("hdr")).unwrap();
-    std::fs::rename(&denoise_file.with_extension("cfl"), &denoise_file.with_file_name("denoised_r").with_extension("cfl")).unwrap();
+    // std::fs::rename(&denoise_file.with_extension("hdr"), &denoise_file.with_file_name("denoised_r").with_extension("hdr")).unwrap();
+    // std::fs::rename(&denoise_file.with_extension("cfl"), &denoise_file.with_file_name("denoised_r").with_extension("cfl")).unwrap();
 
-    std::fs::rename(&noise_file.with_extension("hdr"), &noise_file.with_file_name("noise_r").with_extension("hdr")).unwrap();
-    std::fs::rename(&noise_file.with_extension("cfl"), &noise_file.with_file_name("noise_r").with_extension("cfl")).unwrap();
+    // std::fs::rename(&noise_file.with_extension("hdr"), &noise_file.with_file_name("noise_r").with_extension("hdr")).unwrap();
+    // std::fs::rename(&noise_file.with_extension("cfl"), &noise_file.with_file_name("noise_r").with_extension("cfl")).unwrap();
 
-    std::fs::rename(&norm_file.with_extension("hdr"), &norm_file.with_file_name("norm_r").with_extension("hdr")).unwrap();
-    std::fs::rename(&norm_file.with_extension("cfl"), &norm_file.with_file_name("norm_r").with_extension("cfl")).unwrap();
+    // std::fs::rename(&norm_file.with_extension("hdr"), &norm_file.with_file_name("norm_r").with_extension("hdr")).unwrap();
+    // std::fs::rename(&norm_file.with_extension("cfl"), &norm_file.with_file_name("norm_r").with_extension("cfl")).unwrap();
 
 
-    let reader = CflReader::new(&denoise_file.with_file_name("denoised_r")).unwrap();
-    let noise_reader = CflReader::new(noise_file.with_file_name("noise_r")).unwrap();
-    let norm_reader = CflReader::new(norm_file.with_file_name("norm_r")).unwrap();
+    // let reader = CflReader::new(&denoise_file.with_file_name("denoised_r")).unwrap();
+    // let noise_reader = CflReader::new(noise_file.with_file_name("noise_r")).unwrap();
+    // let norm_reader = CflReader::new(norm_file.with_file_name("norm_r")).unwrap();
 
     let writer = Arc::new(Mutex::new(
-        CflWriter::new(c.result_filename(ResultFile::Denoised),&c.padded_stack_size).unwrap()
+        CflWriter::open(c.result_filename(ResultFile::Denoised)).unwrap()
     ));
 
     let noise_writer = Arc::new(Mutex::new(
-        CflWriter::new(c.result_filename(ResultFile::Noise),&c.padded_stack_size[0..3]).unwrap()
+        CflWriter::open(c.result_filename(ResultFile::Noise)).unwrap()
     ));
 
     let norm_writer = Arc::new(Mutex::new(
-        CflWriter::new(c.result_filename(ResultFile::Norm),&c.padded_stack_size[0..3]).unwrap()
+        CflWriter::open(c.result_filename(ResultFile::Norm)).unwrap()
     ));
 
     let patch_size = c.patch_planner.patch_size();
@@ -632,18 +634,18 @@ fn mppca_reconstruct(config:impl AsRef<Path>,partition_idx:usize) {
 
     let patch_ranges = &c.patch_ranges.get(partition_idx).unwrap().clone();
     //let mut patch_indices = vec![0usize;patch_size];
-    //let ones = vec![Complex32::ONE;patch_size];
+    let ones = vec![Complex32::ONE;patch_size];
     //let mut norm_tmp = vec![Complex32::ZERO;patch_size];
 
-    //let write_operation = |a,b| a + b;
+    let write_operation = |a,b| a + b;
 
     patch_ranges.iter().enumerate().for_each(|(process_idx,process)|{
     //for (process_idx,process) in patch_ranges.iter().enumerate() {
 
 
         let mut patch_indices = vec![0usize;patch_size];
-        let mut norm_tmp = vec![Complex32::ZERO;patch_size];
-        let mut noise_tmp = Array1::from_elem(patch_size.f(), Complex32::ZERO);
+        // let mut norm_tmp = vec![Complex32::ZERO;patch_size];
+        // let mut noise_tmp = Array1::from_elem(patch_size.f(), Complex32::ZERO);
 
         println!("working on process {}",process_idx);
 
@@ -654,7 +656,7 @@ fn mppca_reconstruct(config:impl AsRef<Path>,partition_idx:usize) {
         let mut noise_data_read_address = 0;
 
         let mut patch_noise_tmp = Array1::<Complex32>::zeros(patch_size.f());
-        let mut patch_noise_read_tmp = Array1::<Complex32>::zeros(patch_size.f());
+        //let mut patch_noise_read_tmp = Array1::<Complex32>::zeros(patch_size.f());
 
         let process_patch_ids = process.clone().collect::<Vec<_>>();
 
@@ -678,31 +680,35 @@ fn mppca_reconstruct(config:impl AsRef<Path>,partition_idx:usize) {
                 c.patch_planner.linear_indices(partition_idx, patch_idx, &mut patch_indices);
 
                 patch_noise_tmp.fill(patch_noise);
-                noise_reader.read_into(&patch_indices, &mut patch_noise_read_tmp.as_slice_memory_order_mut().unwrap()).unwrap();
-                patch_noise_tmp += &patch_noise_read_tmp;
-                noise_writer.lock().unwrap().write_from(&patch_indices, patch_noise_tmp.as_slice_memory_order().unwrap()).unwrap();
+                //noise_reader.read_into(&patch_indices, &mut patch_noise_read_tmp.as_slice_memory_order_mut().unwrap()).unwrap();
+                //patch_noise_tmp += &patch_noise_read_tmp;
+                noise_writer.lock().unwrap().write_op_from(&patch_indices, patch_noise_tmp.as_slice_memory_order().unwrap(),write_operation).unwrap();
 
-                norm_reader.read_into(&patch_indices, &mut norm_tmp).unwrap();
-                norm_tmp.iter_mut().for_each(|x| *x += Complex32::ONE);
-                norm_writer.lock().unwrap().write_from(&patch_indices, &norm_tmp).unwrap();
+                //norm_reader.read_into(&patch_indices, &mut norm_tmp).unwrap();
+                //norm_tmp.iter_mut().for_each(|x| *x += Complex32::ONE);
+                norm_writer.lock().unwrap().write_op_from(&patch_indices, &ones, write_operation).unwrap();
 
                 for col in patch.axis_iter(Axis(1)) {
                     //println!("writing patch ...");
-                    reader.read_into(&patch_indices, noise_tmp.as_slice_memory_order_mut().unwrap()).unwrap();
-                    noise_tmp += &col;
-                    writer.lock().unwrap().write_from(&patch_indices, noise_tmp.as_slice_memory_order().unwrap()).unwrap();
+                    //reader.read_into(&patch_indices, noise_tmp.as_slice_memory_order_mut().unwrap()).unwrap();
+                    //noise_tmp += &col;
+                    writer.lock().unwrap().write_op_from(&patch_indices, col.as_slice_memory_order().unwrap(),write_operation).unwrap();
                     patch_indices.par_iter_mut().for_each(|idx| *idx += padded_volume_stride);
                 }
             });
         }
     });
 
-    std::fs::remove_file(&denoise_file.with_file_name("denoised_r").with_extension("hdr")).unwrap();
-    std::fs::remove_file(&denoise_file.with_file_name("denoised_r").with_extension("cfl")).unwrap();
-    std::fs::remove_file(&noise_file.with_file_name("noise_r").with_extension("hdr")).unwrap();
-    std::fs::remove_file(&noise_file.with_file_name("noise_r").with_extension("cfl")).unwrap();
-    std::fs::remove_file(&norm_file.with_file_name("norm_r").with_extension("hdr")).unwrap();
-    std::fs::remove_file(&norm_file.with_file_name("norm_r").with_extension("cfl")).unwrap();
+    writer.lock().unwrap().flush().expect("failed to flush writer");
+    noise_writer.lock().unwrap().flush().expect("failed to flush writer");
+    norm_writer.lock().unwrap().flush().expect("failed to flush writer");
+
+    // std::fs::remove_file(&denoise_file.with_file_name("denoised_r").with_extension("hdr")).unwrap();
+    // std::fs::remove_file(&denoise_file.with_file_name("denoised_r").with_extension("cfl")).unwrap();
+    // std::fs::remove_file(&noise_file.with_file_name("noise_r").with_extension("hdr")).unwrap();
+    // std::fs::remove_file(&noise_file.with_file_name("noise_r").with_extension("cfl")).unwrap();
+    // std::fs::remove_file(&norm_file.with_file_name("norm_r").with_extension("hdr")).unwrap();
+    // std::fs::remove_file(&norm_file.with_file_name("norm_r").with_extension("cfl")).unwrap();
 
 }
 
