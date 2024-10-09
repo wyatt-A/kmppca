@@ -9,11 +9,12 @@ use cfl::{
 use fourier::window_functions::WindowFunction;
 use kmppca::{ceiling_div, patch_planner::{self, PatchPlanner}, singular_value_threshold_mppca, slurm::{self, SlurmTask}};
 use cfl::num_complex::Complex32;
-use ndarray_linalg::assert;
 use serde::{Deserialize, Serialize};
 use mr_data::civm_raw2::CivmRaw2;
 use clap::{Parser,Subcommand};
 use walkdir::WalkDir;
+
+const MB:usize = 1048576;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -76,8 +77,6 @@ struct InitArgs {
 #[derive(Parser, Debug, Clone)]
 struct DenoiseArgs {
     config:PathBuf,
-    #[clap(short = 'p')]
-    partition_idx:Option<usize>
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -127,12 +126,22 @@ fn main() {
             let c = Config::from_file(&denoise_args.config);
             mppca_allocate_output(&denoise_args.config);
             if slurm::is_installed() {
-                launch_array_jobs(&denoise_args.config,"denoise_test",80_000,denoise_args.partition_idx); // 2 gigs of memory per process
+                //launch_array_jobs(&denoise_args.config,"denoise_test",80_000,denoise_args.partition_idx); // 2 gigs of memory per process
+                let mut jid = mppca_build_4d_launch(&denoise_args.config, None);
+                jid = mppca_phase_correct_launch(&denoise_args.config, Some(jid));
+                jid = mppca_pad_launch(&denoise_args.config, Some(jid));
+                mppca_denoise_launch(&denoise_args.config, Some(jid));
             }else {
+
+                mppca_build_4d(&denoise_args.config);
+                mppca_phase_correct(&denoise_args.config);
+                mppca_pad(&denoise_args.config);
+
                 for partition in 0..c.patch_ranges.len() {
                     for process in 0..c.patch_ranges[partition].len() {
                         mppca_denoise(&denoise_args.config, process, partition);
                     }
+                    mppca_reconstruct(&denoise_args.config, partition);
                 }
             }
         },
@@ -519,7 +528,7 @@ fn mppca_build_4d_launch(config:impl AsRef<Path>, job_dep:Option<u64>) -> u64 {
     let work_dir = config.as_ref().parent().unwrap();
 
     let c = Config::from_file(&config);
-    let mem_estimate_mb = c.volume_size.iter().product::<usize>() * size_of::<Complex32>() / 2^20;
+    let mem_estimate_mb = (c.volume_size.iter().product::<usize>() * size_of::<Complex32>()) / MB;
 
     // set up the array jobs over n_processes (length of patch id ranges)
     let task = SlurmTask::new(work_dir,"build-cfl",2 * mem_estimate_mb)
@@ -627,7 +636,7 @@ fn mppca_phase_correct_launch(config:impl AsRef<Path>,job_dep:Option<u64>) -> u6
     let work_dir = config.as_ref().parent().unwrap();
 
     let c = Config::from_file(&config);
-    let mem_estimate_mb = c.volume_size.iter().product::<usize>() * size_of::<Complex32>() / 2^20;
+    let mem_estimate_mb = (c.volume_size.iter().product::<usize>() * size_of::<Complex32>()) / MB;
 
     // set up the array jobs over n_processes (length of patch id ranges)
     let task = SlurmTask::new(work_dir,"phase-correct",4 * mem_estimate_mb) // 4 volumes of memory
@@ -726,7 +735,7 @@ fn mppca_pad_launch(config:impl AsRef<Path>,job_dep:Option<u64>) -> u64 {
     let work_dir = config.as_ref().parent().unwrap();
 
     let c = Config::from_file(&config);
-    let mem_estimate_mb = c.patch_planner.padded_array_size().iter().product::<usize>() * size_of::<Complex32>() / 2^20;
+    let mem_estimate_mb = (c.patch_planner.padded_array_size().iter().product::<usize>() * size_of::<Complex32>()) / MB;
 
     // set up the array jobs over n_processes (length of patch id ranges)
     let task = SlurmTask::new(work_dir,"pad",4 * mem_estimate_mb) // 4 volumes of memory
@@ -913,14 +922,12 @@ fn mppca_denoise_launch(config:impl AsRef<Path>,job_dep:Option<u64>) -> u64 {
     let c = Config::from_file(&config);
     let this_exe = std::env::current_exe().unwrap();
 
-    let mut dep_job:Option<u64> = None;
+    let mut dep_job:Option<u64> = job_dep;
 
+    //mppca_allocate_output(&config);
 
-    let denoise_req_mem_mb = 4 * (c.patch_planner.patch_size() * c.stack_size[3] * c.batch_size) * 8 / 2^20;
-
-    let reconstruct_req_mem_mb = 4 * (c.patch_planner.patch_size() * c.stack_size[3] * c.batch_size) * 8 / 2^20;
-
-
+    let denoise_req_mem_mb = (4 * (c.patch_planner.patch_size() * c.stack_size[3] * c.batch_size) * 8) / MB;
+    let reconstruct_req_mem_mb = (4 * (c.patch_planner.patch_size() * c.stack_size[3] * c.batch_size) * 8) / MB;
 
     for (partition,ranges) in c.patch_ranges.iter().enumerate() {
         
