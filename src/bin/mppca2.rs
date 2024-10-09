@@ -1,5 +1,8 @@
 use std::{fmt::write, fs::File, io::{Read, Write}, ops::Range, path::{Path, PathBuf}, process::Command, sync::{Arc, Mutex}, time::Instant};
-use cfl::{ndarray::{parallel::prelude::{IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Slice, Zip}, num_complex::{Complex, ComplexFloat}, CflReader, CflWriter};
+use cfl::{
+    ndarray::{
+        parallel::prelude::{
+            IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator}, s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Zip}, num_complex::ComplexFloat, CflReader, CflWriter};
 use fourier::window_functions::WindowFunction;
 use kmppca::{ceiling_div, patch_planner::PatchPlanner, singular_value_threshold_mppca, slurm::{self, SlurmTask}};
 use cfl::num_complex::Complex32;
@@ -162,7 +165,7 @@ fn launch_array_jobs(config:impl AsRef<Path>,job_name:&str,req_mem_mb:usize,part
         let mut recon_task = SlurmTask::new(&c.work_dir,&format!("{}_reconstruct_{}",job_name,p_idx),req_mem_mb)
         .output(&c.work_dir)
         .job_dependency_after_ok(jid)
-        .on_node("n018")
+        //.on_node("n018")
         .command(recon_cmd);
         recon_task.submit();
 
@@ -201,7 +204,7 @@ fn launch_array_jobs(config:impl AsRef<Path>,job_name:&str,req_mem_mb:usize,part
         let mut recon_task = SlurmTask::new(&c.work_dir,&format!("{}_reconstruct_{}",job_name,partition),req_mem_mb)
         .output(&c.work_dir)
         .job_dependency_after_ok(jid)
-        .on_node("n018")
+        //.on_node("n018")
         .command(recon_cmd);
         let jid = recon_task.submit();
 
@@ -274,9 +277,14 @@ fn mppca_allocate_output(config:impl AsRef<Path>) {
     let denoise_out = c.result_filename(ResultFile::Denoised);
     let noise_out = c.result_filename(ResultFile::Noise);
     let norm_out = c.result_filename(ResultFile::Norm);
-    let _ = CflWriter::new(denoise_out,&c.padded_stack_size).unwrap();
-    let _ = CflWriter::new(noise_out,&c.patch_planner.padded_array_size()).unwrap();
-    let _ = CflWriter::new(norm_out,&c.patch_planner.padded_array_size()).unwrap();
+    let a = CflWriter::new(denoise_out,&c.padded_stack_size).unwrap();
+    let b = CflWriter::new(noise_out,&c.patch_planner.padded_array_size()).unwrap();
+    let c = CflWriter::new(norm_out,&c.patch_planner.padded_array_size()).unwrap();
+
+    a.flush().unwrap();
+    b.flush().unwrap();
+    c.flush().unwrap();
+
 }
 
 fn mppca_plan(work_dir:impl AsRef<Path>,input_cfl_pattern:&str,n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
@@ -371,6 +379,9 @@ fn mppca_build_4d(config_file:impl AsRef<Path>) {
         .expect("failed to write volume into 4-D stack");
     });
 
+    println!("flushing cfl buffer ...");
+    writer.lock().unwrap().flush().expect("failed to flush writer");
+
 }
 
 fn mppca_phase_correct(config_file:impl AsRef<Path>) {
@@ -416,6 +427,9 @@ fn mppca_phase_correct(config_file:impl AsRef<Path>) {
         writer.write_slice(starting_addr, volume_data).expect("failed to write to 4-D stack");
 
     }
+
+    println!("flushing cfl buffer ...");
+    writer.flush().expect("failed to flush writer");
 }
 
 
@@ -469,7 +483,8 @@ fn mppca_pad(config_file:impl AsRef<Path>) {
             .assign(
                 &non_padded_tmp.slice(s![0..pad_amount[0],..,..])
             );
-            non_padded_tmp = padded_tmp.clone();
+            //non_padded_tmp = padded_tmp.clone();
+            non_padded_tmp.assign(&padded_tmp);
         }
 
         if pad_amount[1] > 0 {
@@ -477,7 +492,8 @@ fn mppca_pad(config_file:impl AsRef<Path>) {
             .assign(
                 &non_padded_tmp.slice(s![..,0..pad_amount[1],..])
             );
-            non_padded_tmp = padded_tmp.clone();
+            //non_padded_tmp = padded_tmp.clone();
+            non_padded_tmp.assign(&padded_tmp);
         }
 
         if pad_amount[2] > 0 {
@@ -489,6 +505,8 @@ fn mppca_pad(config_file:impl AsRef<Path>) {
 
         writer.write_slice(starting_addr_padded, padded_tmp.as_slice_memory_order().unwrap()).unwrap();
     }
+
+    writer.flush().expect("failed to flush writer");
 }
 
 
@@ -516,10 +534,10 @@ fn mppca_denoise(config_file:impl AsRef<Path>,process_idx:usize,partition_idx:us
     println!("n_patches for proceess {}: {}",process_idx,patch_ids.len());
 
     let reader = CflReader::new(padded_in).unwrap();
-    // let mut writer = CflWriter::open(denoised_out).unwrap();
+    // let mut writer = CflBufWriter::open(denoised_out).unwrap();
     
-    // let mut noise_writer = CflWriter::open(noise_out).unwrap();
-    // let mut norm = CflWriter::open(norm_out).unwrap();
+    // let mut noise_writer = CflBufWriter::open(noise_out).unwrap();
+    // let mut norm = CflBufWriter::open(norm_out).unwrap();
 
     
 
@@ -560,6 +578,7 @@ fn mppca_denoise(config_file:impl AsRef<Path>,process_idx:usize,partition_idx:us
 
         println!("doing MPPCA denoising on batch {} of {} ...",batch_id+1,n_batches);
         singular_value_threshold_mppca(&mut patch_data, noise_data.as_slice_memory_order_mut().unwrap(), None);
+        println!("batch complete");
         
         // instead of writing back to these files directly, we need to write to our own file
         // to the later aggrigate with a single process. This is to avoid NFS + multiple computer
@@ -576,6 +595,8 @@ fn mppca_denoise(config_file:impl AsRef<Path>,process_idx:usize,partition_idx:us
 
 
         // patch_data.axis_iter(Axis(2)).zip(batch).zip(noise_data.iter()).for_each(|((patch,&patch_idx),&patch_noise)|{
+
+        //     println!("writing patch {}",patch_idx);
         //     // get the patch index values, shared over all volumes in data set
         //     c.patch_planner.linear_indices(partition_idx, patch_idx, &mut patch_indixes);
 
@@ -588,10 +609,15 @@ fn mppca_denoise(config_file:impl AsRef<Path>,process_idx:usize,partition_idx:us
         //         patch_indixes.par_iter_mut().for_each(|idx| *idx += padded_volume_stride);
         //     }
         // });
+
+
+
     }
 
+    //writer.flush().expect("failed to flush writer");
     denoised_patch_file.flush().expect("failed to flush writer");
     noise_file.flush().expect("failed to flush writer");
+
 }
 
 fn mppca_reconstruct(config:impl AsRef<Path>,partition_idx:usize) {
@@ -639,7 +665,7 @@ fn mppca_reconstruct(config:impl AsRef<Path>,partition_idx:usize) {
 
     let write_operation = |a,b| a + b;
 
-    patch_ranges.iter().enumerate().for_each(|(process_idx,process)|{
+    patch_ranges.par_iter().enumerate().for_each(|(process_idx,process)|{
     //for (process_idx,process) in patch_ranges.iter().enumerate() {
 
 
