@@ -110,7 +110,7 @@ fn main() {
             let mut patch_stride = [0usize;3];
             patch_size.iter_mut().zip(plan_args.patch_size).for_each(|(a,b)| *a = b);
             patch_stride.iter_mut().zip(plan_args.patch_stride).for_each(|(a,b)| *a = b);
-            mppca_plan2(
+            mppca_plan(
                 plan_args.work_dir,
                 plan_args.input_raw_dir,
                 plan_args.output_dir,
@@ -360,7 +360,7 @@ fn test() {
     println!("{:#?}",files);
 }
 
-fn mppca_plan2(work_dir:impl AsRef<Path>,input_base_dir:impl AsRef<Path>,output_dir:impl AsRef<Path>, n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
+fn mppca_plan(work_dir:impl AsRef<Path>,input_base_dir:impl AsRef<Path>,output_dir:impl AsRef<Path>, n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
 
     if !work_dir.as_ref().exists() {
         std::fs::create_dir_all(work_dir.as_ref())
