@@ -19,3 +19,4 @@ civm_rust_utils = { git = "git+ssh://git@github.com:/wyatt-A/civm_rust_utils.git
 fourier = { git = "git+ssh://git@github.com:/wyatt-A/fourier.git", branch = "main", features = ["fftw3"]}
 mr_data = {path = "../civm_scan/mr_data"}
 walkdir = "2.5.0"
+headfile = {path = "../civm_scan/headfile"}

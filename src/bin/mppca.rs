@@ -7,10 +7,11 @@ use cfl::{
         s, Array1, Array3, ArrayD, Axis, ShapeBuilder, Zip}, num_complex::ComplexFloat, CflReader, CflWriter
     };
 use fourier::window_functions::WindowFunction;
+use headfile::headfile::Headfile;
 use kmppca::{ceiling_div, patch_planner::{self, PatchPlanner}, singular_value_threshold_mppca, slurm::{self, SlurmTask}};
 use cfl::num_complex::Complex32;
 use serde::{Deserialize, Serialize};
-use mr_data::civm_raw2::CivmRaw2;
+use mr_data::{civm_raw::{u16_scale_from_f32, ImageScale}, civm_raw2::CivmRaw2};
 use clap::{Parser,Subcommand};
 use walkdir::WalkDir;
 
@@ -59,7 +60,8 @@ struct AllocateOutputArgs {
 #[derive(Parser, Debug, Clone)]
 struct PlanArgs {
     work_dir:PathBuf,
-    input_raw_dir:String,
+    input_raw_dir:PathBuf,
+    output_dir:PathBuf,
     n_volumes:usize,
     n_processes:usize,
     batch_size:usize,
@@ -94,7 +96,8 @@ struct ReconstructArgs {
 
 #[derive(Parser, Debug, Clone)]
 struct SplitArgs {
-    config:PathBuf
+    config:PathBuf,
+    write_directory:PathBuf,
 }
 
 fn main() {
@@ -109,7 +112,8 @@ fn main() {
             patch_stride.iter_mut().zip(plan_args.patch_stride).for_each(|(a,b)| *a = b);
             mppca_plan2(
                 plan_args.work_dir,
-                &plan_args.input_raw_dir,
+                plan_args.input_raw_dir,
+                plan_args.output_dir,
                 plan_args.n_volumes,
                 patch_size,
                 patch_stride,
@@ -130,19 +134,19 @@ fn main() {
                 let mut jid = mppca_build_4d_launch(&denoise_args.config, None);
                 jid = mppca_phase_correct_launch(&denoise_args.config, Some(jid));
                 jid = mppca_pad_launch(&denoise_args.config, Some(jid));
-                mppca_denoise_launch(&denoise_args.config, Some(jid));
+                jid = mppca_denoise_launch(&denoise_args.config, Some(jid));
+                mppca_write_civm_raw_launch(&denoise_args.config, Some(jid));
             }else {
-
                 mppca_build_4d(&denoise_args.config);
                 mppca_phase_correct(&denoise_args.config);
                 mppca_pad(&denoise_args.config);
-
                 for partition in 0..c.patch_ranges.len() {
                     for process in 0..c.patch_ranges[partition].len() {
                         mppca_denoise(&denoise_args.config, process, partition);
                     }
                     mppca_reconstruct(&denoise_args.config, partition);
                 }
+                mppca_write_civm_raw(&denoise_args.config);
             }
         },
         SubCmd::DenoisePartition(denoise_partition_args) => {
@@ -159,7 +163,8 @@ fn main() {
             mppca_reconstruct(reconstruct_args.config,reconstruct_args.partition_id);
         }
         SubCmd::Split(split_args) => {
-            mppca_split_4d(split_args.config);
+            //mppca_split_4d(split_args.config);
+            mppca_write_civm_raw(split_args.config);
         },
         SubCmd::BuildCfl(build4_dargs) => mppca_build_4d(build4_dargs.config),
         SubCmd::PhaseCorrect(phase_correct_args) =>  mppca_phase_correct(phase_correct_args.config),
@@ -270,6 +275,7 @@ pub enum ResultFile {
 #[derive(Serialize,Deserialize)]
 struct Config {
     work_dir:PathBuf,
+    output_dir:PathBuf,
     patch_planner:PatchPlanner,
     input_volumes:Vec<PathBuf>,
     volume_size:[usize;3],
@@ -354,7 +360,7 @@ fn test() {
     println!("{:#?}",files);
 }
 
-fn mppca_plan2(work_dir:impl AsRef<Path>,input_base_dir:&str,n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
+fn mppca_plan2(work_dir:impl AsRef<Path>,input_base_dir:impl AsRef<Path>,output_dir:impl AsRef<Path>, n_volumes:usize,patch_size:[usize;3],patch_stride:[usize;3],n_processes:usize,batch_size:usize) {
 
     if !work_dir.as_ref().exists() {
         std::fs::create_dir_all(work_dir.as_ref())
@@ -402,6 +408,7 @@ fn mppca_plan2(work_dir:impl AsRef<Path>,input_base_dir:&str,n_volumes:usize,pat
     
     let c = Config {
         work_dir:work_dir.as_ref().to_path_buf(),
+        output_dir: output_dir.as_ref().to_path_buf(),
         patch_planner,
         input_volumes: headfiles,
         n_processes,
@@ -1002,7 +1009,128 @@ fn mppca_split_4d(config:impl AsRef<Path>) {
         println!("writing volume ...");
         cfl::from_array(out, &unpadded_temp).unwrap();
     }
+}
 
+fn mppca_write_civm_raw(config:impl AsRef<Path>) {
+
+    let c = Config::from_file(config);
+
+    if !c.output_dir.exists() {
+        std::fs::create_dir_all(&c.output_dir).expect("failed to create write dir");
+    }
+
+    let denoised_reader = CflReader::new(c.result_filename(ResultFile::Denoised)).unwrap();
+
+    let norm = cfl::to_array(c.result_filename(ResultFile::Norm), true).unwrap();
+
+    let padded_volume_stride = c.patch_planner.padded_array_size().iter().product::<usize>();
+
+    let mut padded_temp = Array3::from_elem(c.patch_planner.padded_array_size().f(), Complex32::ZERO);
+    let mut unpadded_temp = ArrayD::from_elem(c.volume_size.as_slice().f(), Complex32::ZERO);
+
+    let mut image_scale:Option<ImageScale> = None;
+
+    for vol in 0..c.stack_size[3] {
+        println!("working on volume {} of {}",vol+1,c.stack_size[3]);
+        let address = vol * padded_volume_stride;
+        println!("reading {} MB",(padded_volume_stride * size_of::<Complex32>()) / MB);
+        let now = Instant::now();
+        denoised_reader.read_slice(address, padded_temp.as_slice_memory_order_mut().unwrap()).unwrap();
+        let dur = now.elapsed().as_secs_f32();
+        println!("read took {} sec",dur);
+        // normalize denoised volume by norm volume
+        println!("un-padding volume ...");
+        padded_temp /= &norm;
+        unpadded_temp.assign(
+            &padded_temp.slice(s![0..c.volume_size[0],0..c.volume_size[1],0..c.volume_size[2]])
+        );
+
+
+        let mut hf = Headfile::open(&c.input_volumes[vol]).to_hash();
+
+
+        let scale = image_scale.get_or_insert_with(||{
+            let scaling_hist_percent = hf.get("scale_factor_histo_percent")
+            .expect("failed to get scale histo % from headfile")
+            .parse::<f64>().expect("failed to parse scal hist percent");
+            calc_scale(&unpadded_temp, scaling_hist_percent)
+        });
+
+        let s = hf.get_mut("scale_factor_to_civmraw")
+        .expect("failed to get scale_factor_to_civmraw");
+        s.clear();
+        s.push_str(&scale.scale_factor.to_string());
+    
+        let s = hf.get_mut("F_imgformat")
+        .expect("failed to get F_imgformat");
+        s.clear();
+        s.push_str("raw");
+
+        let s = hf.get_mut("U_runno")
+        .expect("failed to get U_runno");
+        *s = modify_runno(s);
+
+        let write_dir = c.output_dir.join(&s);
+        println!("writing volume to {} ...",write_dir.display());
+        
+        let tic = Instant::now();
+
+        CivmRaw2::from_hash(hf)
+        .expect("bad headfile")
+        .with_complex_data(unpadded_temp.clone())
+        .write(write_dir, true)
+        .expect("failed to write images");
+        let toc = tic.elapsed().as_secs_f32();
+
+        println!("write took {} sec",toc);
+    }
+}
+
+fn mppca_write_civm_raw_launch(config:impl AsRef<Path>,job_dep:Option<u64>) -> u64 {
+
+    let this_exe = std::env::current_exe().expect("failed to get this exe");
+    let mut cmd = Command::new(&this_exe);
+    cmd.arg("split");
+    cmd.arg(&config.as_ref());
+
+    let work_dir = config.as_ref().parent().unwrap();
+
+    let c = Config::from_file(&config);
+    let mem_estimate_mb = (c.patch_planner.padded_array_size().iter().product::<usize>() * size_of::<Complex32>()) / MB;
+
+    // set up the array jobs over n_processes (length of patch id ranges)
+    let task = SlurmTask::new(work_dir,"write-images",2 * mem_estimate_mb) // 4 volumes of memory
+    .output(work_dir)
+    .command(cmd);
+
+    let mut task = if let Some(id) = job_dep {
+        task.job_dependency_after_ok(id)
+    }else {
+        task
+    };
+
+    task.submit()
+}
+
+
+fn modify_runno(runno:&str) -> String {
+    if let Some(pos) = runno.find("_m") {
+        let mut r = runno.to_string();
+        r.insert_str(pos, "MPPCA");
+        r
+    }else {
+        let mut r = runno.to_string();
+        r.push_str("MPPCA");
+        r
+    }
+}
+
+fn calc_scale(image: &ArrayD<Complex32>,scaling_hist_percent: f64) -> ImageScale {
+    let mag = image.map(|x| x.abs());
+    let raw_data = mag
+        .as_slice_memory_order()
+        .expect("array must be contiguous in memory");
+    u16_scale_from_f32(raw_data,scaling_hist_percent)
 }
 
 fn split_indices(n: usize, batches: usize) -> Vec<Range<usize>> {
