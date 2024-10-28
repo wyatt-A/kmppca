@@ -5,8 +5,9 @@ edition = "2021"
 
 [dependencies]
 cfl = {git = "git+ssh://git@github.com:/wyatt-A/cfl.git", branch = "main" }
-ndarray-linalg = {version = "0.15.0",features = ["netlib-system"]}
-#ndarray-linalg = {version = "0.15.0",features = ["openblas-system"]}
+cs_table = {path = "../civm_scan/cs_table"}
+#ndarray-linalg = {version = "0.15.0",features = ["netlib-system"]}
+ndarray-linalg = {version = "0.15.0",features = ["openblas-system"]}
 array_utils = {path = "../civm_scan/array_utils"}
 rand = "0.8.5"
 byte-order = "0.3.0"
@@ -19,4 +20,8 @@ civm_rust_utils = { git = "git+ssh://git@github.com:/wyatt-A/civm_rust_utils.git
 fourier = { git = "git+ssh://git@github.com:/wyatt-A/fourier.git", branch = "main", features = ["fftw3"]}
 mr_data = {path = "../civm_scan/mr_data"}
 walkdir = "2.5.0"
+<<<<<<< HEAD
 headfile = {path = "../civm_scan/headfile"}
+=======
+nifti = "0.16.0"
+>>>>>>> 89f40e4 (update)

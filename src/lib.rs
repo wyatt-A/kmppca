@@ -3,13 +3,12 @@ use std::{cell::RefCell, collections::HashMap, fs::File, io::{Read, Seek, Write}
 use cfl::{ndarray::{parallel::prelude::{IntoParallelIterator, IntoParallelRefIterator}, Array2, Array3, ArrayD, Axis, ShapeBuilder}, num_complex::{Complex, Complex32, ComplexFloat}};
 use fourier::window_functions::WindowFunction;
 use indicatif::ProgressStyle;
-use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD};
+use ndarray_linalg::{c32, SVDInplace, SVDInto, SVD, SVDDC};
 use patch_generator::{partition_patch_ids, PatchGenerator};
 use serde::{Deserialize, Serialize};
 use cfl::ndarray::parallel::prelude::ParallelIterator;
 pub mod patch_planner;
 use cfl::ndarray::parallel::prelude::*;
-
 pub mod slurm;
 
 #[cfg(test)]
@@ -287,6 +286,58 @@ impl Config {
     }
 }
 
+pub fn _singular_value_threshold_mppca(matrix:&mut Array2<Complex32>, rank:Option<usize>) -> Option<f32> {
+
+        let m = matrix.shape()[0];
+        let n = matrix.shape()[1];
+
+        //let mut _s = Array2::from_elem((m,n), Complex32::ZERO);
+
+        let nn = m.min(n);
+        let mut _s = Array2::from_elem((nn,nn), Complex32::ZERO);
+
+        //let (_,s,_) = matrix.svd(true, true).unwrap();
+        // let (_,sigma_sq) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
+        // matrix.par_mapv_inplace(|x| x / sigma_sq);
+        //let (u,mut s,v) = matrix.svd(true, true).unwrap();
+
+        let (u,mut s,v) = matrix.svddc(ndarray_linalg::UVTFlag::Some).unwrap();
+
+        let u = u.unwrap();
+        let v = v.unwrap();
+
+        // println!("u:{:?}",u.shape());
+        // println!("s:{:?}",s.shape());
+        // println!("v:{:?}",v.shape());
+
+        let mut noise = None;
+
+        let rank = rank.unwrap_or_else(||{
+            let (rank,sigma_sq) = marchenko_pastur_singular_value(&s.as_slice().unwrap(), m, n);
+            noise = Some(sigma_sq);
+            rank
+        });
+        
+        s.iter_mut().enumerate().for_each(|(i,val)| if i >= rank {*val = 0.});
+
+        //let u = u.unwrap();
+        //let v = v.unwrap();
+        let mut diag_view = _s.diag_mut();
+        diag_view.assign(
+            &s.map(|x|Complex32::new(*x,0.))
+        );
+
+        // if u in 1x1
+        let denoised_matrix = if u.len() == 1 {
+            _s.dot(&v)
+        }else {
+            u.dot(&_s).dot(&v)
+        };
+
+        //let denoised_matrix = u.dot(&_s).dot(&v);
+        matrix.assign(&denoised_matrix);
+        noise
+}
 
 pub fn singular_value_threshold_mppca(patch_data:&mut Array3<Complex32>, noise:&mut [f32], rank:Option<usize>) {
 
